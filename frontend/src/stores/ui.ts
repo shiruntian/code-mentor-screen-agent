@@ -1,8 +1,14 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import type { DemoInfo } from '../types'
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 export type BgKind = 'none' | 'image' | 'video'
+
+/** 图片放大预览的载荷 */
+export interface LightboxImage {
+  url: string
+  name?: string
+}
 
 export interface BackgroundState {
   kind: BgKind
@@ -83,6 +89,9 @@ export const useUiStore = defineStore('ui', {
 
     // 自定义背景：图片或循环视频
     background: { ...DEFAULT_BG } as BackgroundState,
+
+    // 图片放大预览（null = 关着）
+    lightbox: null as LightboxImage | null,
   }),
 
   getters: {
@@ -109,6 +118,15 @@ export const useUiStore = defineStore('ui', {
     },
     closeScreen() {
       this.screenOpen = false
+    },
+
+    /** 打开图片放大预览 */
+    openLightbox(url: string, name = '') {
+      if (!url) return
+      this.lightbox = { url, name }
+    },
+    closeLightbox() {
+      this.lightbox = null
     },
 
     // ------------------------------------------------------------------ 主题

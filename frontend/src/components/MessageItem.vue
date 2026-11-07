@@ -4,6 +4,7 @@ import { useBrandingStore } from '../stores/branding'
 const branding = useBrandingStore()
 import { computed, ref } from 'vue'
 import type { DemoInfo, Message, PlanStep } from '../types'
+import { useUiStore } from '../stores/ui'
 import MarkdownView from './MarkdownView.vue'
 import { clockTime, shortModel } from '../utils/format'
 
@@ -14,6 +15,7 @@ const props = defineProps<{
   planStepStatus?: Record<number, 'running' | 'done' | 'failed'>
 }>()
 const emit = defineEmits<{ (e: 'start-demo', demo: DemoInfo): void }>()
+const ui = useUiStore()
 
 const showPlan = ref(true)
 const showThought = ref(false)
@@ -76,15 +78,22 @@ async function copyContent() {
         <div class="bubble user-bubble" :class="{ pending: message.pending }">
           <MarkdownView v-if="message.content" :content="message.content" />
           <div v-if="attachments.length" class="attachments">
-            <a
+            <button
               v-for="(att, i) in attachments"
               :key="i"
-              :href="att.url"
-              target="_blank"
+              type="button"
               class="thumb"
+              :title="`${att.name}｜点击放大预览`"
+              @click="ui.openLightbox(att.url, att.name)"
             >
               <img :src="att.url" :alt="att.name" />
-            </a>
+              <span class="thumb-zoom">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M20 20l-3.6-3.6M11 8v6M8 11h6" stroke-linecap="round" />
+                </svg>
+              </span>
+            </button>
           </div>
         </div>
       </template>
@@ -252,17 +261,42 @@ async function copyContent() {
   flex-wrap: wrap;
 }
 .thumb {
+  position: relative;
   width: 92px;
   height: 92px;
+  padding: 0;
   border-radius: 10px;
   overflow: hidden;
   border: 1px solid var(--border);
   display: block;
+  cursor: zoom-in;
+  transition: border-color 0.16s, transform 0.16s;
+}
+.thumb:hover {
+  border-color: var(--accent-2);
+  transform: translateY(-1px);
 }
 .thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.thumb-zoom {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.thumb:hover .thumb-zoom {
+  opacity: 1;
 }
 
 /* 计划 */

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
 import ChatHeader from './components/ChatHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -11,6 +11,7 @@ import AgentPanel from './components/AgentPanel.vue'
 import BackgroundLayer from './components/BackgroundLayer.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import ScreenModal from './components/ScreenModal.vue'
+import ImageLightbox from './components/ImageLightbox.vue'
 import { useAppStore } from './stores/app'
 import { useUiStore } from './stores/ui'
 
@@ -20,9 +21,22 @@ branding.load()
 applyAppearance()
 const ui = useUiStore()
 
+/** 拖到输入框以外的地方时，别让浏览器把图片当新页面打开（会丢掉整个应用） */
+function guardFileDrop(e: DragEvent) {
+  const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files')
+  if (hasFiles) e.preventDefault()
+}
+
 onMounted(() => {
   ui.initTheme()
   app.boot()
+  window.addEventListener('dragover', guardFileDrop)
+  window.addEventListener('drop', guardFileDrop)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('dragover', guardFileDrop)
+  window.removeEventListener('drop', guardFileDrop)
 })
 </script>
 
@@ -55,6 +69,7 @@ onMounted(() => {
 
     <SettingsModal v-if="ui.settingsOpen" />
     <ScreenModal v-if="ui.screenOpen" />
+    <ImageLightbox />
 
     <!-- 全局提示 -->
     <div class="toasts">
