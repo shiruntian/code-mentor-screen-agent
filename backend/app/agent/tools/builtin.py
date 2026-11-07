@@ -390,6 +390,35 @@ async def _reveal_in_explorer(ctx: ToolContext, path: str) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+async def _foreground_window(ctx: ToolContext) -> str:
+    from app.agent.tools import sysinfo
+
+    result = await sysinfo.foreground_window()
+    summary = f"{result.get('process')}「{str(result.get('title') or '')[:40]}」" if result.get("ok") else str(result.get("error"))
+    ctx.record("foreground_window", {}, bool(result.get("ok")), summary[:120])
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+async def _list_processes(
+    ctx: ToolContext, keyword: str = "", sort: str = "memory", limit: int = 20
+) -> str:
+    from app.agent.tools import sysinfo
+
+    result = await sysinfo.list_processes(
+        keyword=(keyword or "").strip()[:60],
+        sort=sort if sort in ("memory", "name", "pid") else "memory",
+        limit=_safe_int(limit, 20, 1, 60),
+    )
+    summary = (
+        f"命中 {result.get('total')} 个进程"
+        + (f"，例如 {result['items'][0]['name']}({result['items'][0]['memory']})" if result.get("items") else "")
+        if result.get("ok")
+        else str(result.get("error"))
+    )
+    ctx.record("list_processes", {"keyword": keyword, "sort": sort}, bool(result.get("ok")), summary[:120])
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
 async def _read_file(ctx: ToolContext, path: str, lines: int = 60, tail: bool = False) -> str:
     from app.agent.tools import files as fs
 
@@ -639,12 +668,34 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         """打开资源管理器并选中该文件，适合讲课时「指给学习者看」。"""
         return await _reveal_in_explorer(ctx, path)
 
+    @tool("foreground_window", response_format="content")
+    async def foreground_window() -> str:
+        """看学习者此刻正在用的窗口：进程名、PID、窗口标题、exe 路径。
+
+        回答「我现在在哪个软件」「你看到的是哪个文件」这类问题时用它，比截图快得多；
+        要看清界面里的文字/报错再用 look_at_screen。"""
+        return await _foreground_window(ctx)
+
+    @tool("list_processes", response_format="content")
+    async def list_processes(
+        keyword: Annotated[str, Field(description="按进程名过滤，如 mysql / chrome / code；也可以直接填 PID。留空列出全部")] = "",
+        sort: Annotated[str, Field(description="排序：memory（占内存最多在前）/ name / pid")] = "memory",
+        limit: Annotated[int, Field(description="返回条数 1-60", ge=1, le=60)] = 20,
+    ) -> str:
+        """列出正在运行的进程（名字 / PID / 内存占用 / 窗口标题）。
+
+        「MySQL 起来了吗」「哪个程序吃内存」「QQ 开着没」都用它；
+        它是只读的，不能结束或启动进程——真要关掉某个程序，走屏幕演示让学习者自己点。"""
+        return await _list_processes(ctx, keyword, sort, limit)
+
     tools: list[BaseTool] = [
         knowledge_search,
         python_sandbox,
         remember_fact,
         recall_memory,
         propose_screen_demo,
+        foreground_window,
+        list_processes,
     ]
     if getattr(settings, "agent_screen_tool", True):
         tools.append(look_at_screen)
@@ -674,4 +725,6 @@ TOOL_META = {
     "read_file": {"label": "读文件", "icon": "file", "desc": "只读预览文本内容"},
     "open_path": {"label": "打开路径", "icon": "external", "desc": "用默认程序打开（拒绝可执行文件）"},
     "reveal_in_explorer": {"label": "定位文件", "icon": "pin", "desc": "资源管理器中选中"},
+    "foreground_window": {"label": "当前窗口", "icon": "eye", "desc": "前台进程名 / 标题 / 路径"},
+    "list_processes": {"label": "进程列表", "icon": "list", "desc": "只读查看谁在运行、谁吃内存"},
 }
