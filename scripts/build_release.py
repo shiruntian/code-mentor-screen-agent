@@ -313,6 +313,8 @@ def write_package_docs(pkg_root: Path, stats: dict[str, int], editor_count: int)
     info = {
         "package": PKG_NAME,
         "version": VERSION,
+        "release_stage": "testing/beta",
+        "developed_with": "AI-assisted（AI 编程助手主写 + 人工审校）",
         "built_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "python": sys.version.split()[0],
         "branding": BRANDING,
@@ -329,8 +331,23 @@ def write_package_docs(pkg_root: Path, stats: dict[str, int], editor_count: int)
 
 PACKAGE_README = """# CodeMentor 初始版（开箱即跑的干净快照）
 
+> [!WARNING]
+> **测试版本（v1.0.0-beta）· AI 辅助开发 · 功能尚未完善**
+> 代码由 AI 编程助手主写、人工审校调试；部分功能仍不完整（屏幕演示受视觉模型影响、
+> 环境管家的一键安装只实测了少数工具），**仅供学习与课程演示，请勿用于生产环境**。
+
 这个包是「刚装好、还没开始聊」的状态：**默认 logo + 默认名称 + 预置知识库 + 调优过的参数**，
 没有对话记录、没有长期记忆、没有任何 API Key。
+
+## 已知未完善
+
+| 方面 | 现状 |
+| --- | --- |
+| 屏幕演示 | 依赖视觉模型，复杂界面可能点偏；跨 DPI / 多显示器未充分验证 |
+| 环境管家 | 一键安装只在 Maven / PHP 上跑通过，其余工具未逐个实测 |
+| 前端 | 只适配桌面端（≥1280px），无响应式 |
+| 多用户 | 仅本地单用户，无登录/权限体系 |
+| 工程化 | 无 CI/CD、无覆盖率统计 |
 
 ## 一键启动（推荐）
 

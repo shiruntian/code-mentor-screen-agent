@@ -1693,10 +1693,14 @@ function close() {
       <!-- 关于 -->
       <div v-else class="body about">
         <h3>CodeMentor · 编程学习助手</h3>
+        <p class="beta-note">
+          ⚠️ 测试版本 v1.0.0-beta · AI 辅助开发 · 功能尚未完善<br />
+          代码由 AI 编程助手主写、人工审校调试，仅供学习与课程演示，请勿用于生产环境。
+        </p>
         <p>一个把「规划 → 工具执行 → 讲解 → 手把手演示」串起来的编程学习智能体。</p>
         <ul>
           <li>LangGraph 状态图编排：plan → act ⇄ tools → answer</li>
-          <li>11 个内置工具：知识库检索、代码沙箱、记忆写入/召回、演示提案、看一眼屏幕、本机文件（只读：列目录 / 搜索 / 读文本 / 打开 / 定位）</li>
+          <li>16 个内置工具：知识库检索、代码沙箱、记忆写入/召回、演示提案、看一眼屏幕、本机文件（只读：列目录 / 搜文件 / 读文本 / 打开 / 定位 / 列磁盘）、联网搜索、网页取正文、任务拆解</li>
           <li>RAG：Qdrant 向量库（embedded 模式）+ 离线哈希向量 + 关键词重排</li>
           <li>短期记忆（滚动摘要）+ 长期记忆（MySQL 持久化 + 向量召回）</li>
           <li>多模态：图片上传 / 屏幕截图喂给视觉模型</li>
@@ -2155,6 +2159,16 @@ function close() {
   font-size: 12.5px;
   line-height: 1.8;
   color: var(--text-2);
+}
+.beta-note {
+  margin: 0 0 12px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  font-size: 11.5px !important;
+  line-height: 1.7 !important;
+  color: #f59e0b !important;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.32);
 }
 .about ul {
   padding-left: 20px;
