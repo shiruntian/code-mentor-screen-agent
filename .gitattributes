@@ -1,0 +1,17 @@
+# 统一换行：源码走 LF 进仓库，Windows 检出也能正常用
+* text=auto eol=lf
+
+# 二进制，别做行尾转换
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.zip  binary
+*.db   binary
+*.sqlite binary
+*.woff binary
+*.woff2 binary
+
+# 文档里是中文，diff 时按文本处理
+*.md   text
+*.ps1  text
+*.bat  text eol=crlf

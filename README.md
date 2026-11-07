@@ -1,0 +1,945 @@
+# 🐳 CodeMentor · 编程学习助手
+
+> 一个会**先拆解任务、再调用工具、最后讲解并手把手演示**的编程学习 Agent。
+> FastAPI + LangGraph + MySQL + Qdrant + Vue3，覆盖作业要求的全部六个阶段。
+
+<p align="center">
+  <img src="docs/screenshots/01-welcome.png" width="88%" alt="欢迎页" />
+</p>
+
+---
+
+## 一、这个项目能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 🧠 **自主规划** | 收到问题后先由「规划器」输出 2~4 步 JSON 计划，再由「执行器」按计划调用工具，最后「讲解员」组织答案。回答里的计划、每一步状态都实时显示在右侧面板 |
+| 🔧 **5 个工具** | 知识库检索、Python 代码沙箱、长期记忆写入、长期记忆召回、屏幕演示提案 |
+| 🛡 **工具异常自愈** | 工具内部任何异常都会转成 `{ok:false,error,hint}` 结构返回给模型，模型据此解释并给替代方案，界面不会崩 |
+| 💬 **多会话隔离** | 每个会话独立的消息表、独立上下文、独立标题，可重命名 / 清空 / 删除 |
+| 🧾 **双层记忆** | 短期：最近 N 条消息 + 滚动摘要；长期：跨会话事实/偏好写入 MySQL，并用 Qdrant 语义召回 |
+| 📚 **RAG** | 文档切片 → 向量化 → Qdrant 入库 → 混合检索（向量 0.62 + 关键词 0.38），内置 10 篇编程知识包 |
+| 🖼 **多模态** | 上传图片提问；屏幕演示自动把截图喂给视觉模型 |
+| 🖥 **屏幕演示** | 截图（带 0~1000 坐标网格）→ 视觉模型决策 → 执行鼠标键盘。支持**组合键/快捷键**（Win+R、Alt+Tab、Ctrl+Shift+P…）、批量 sequence、拖动、滚轮、中文输入；逐步记录，可暂停续跑 |
+| 🔑 **多模型热切换** | DeepSeek / 通义千问 / 智谱 / Kimi / 豆包 / 硅基流动 / OpenRouter / Groq / OpenAI / Ollama 本地 / 自定义端点（共 11 家），Key 加密落库、重启即用 |
+| 🧰 **环境管家** | 「设置 → 环境」检测本机 24 个开发工具，一键 winget / 官方 zip 安装（后台任务 + 实时日志 + 默认写 PATH），并读注册表识别 `.py/.java/.js` 的默认打开方式自动补进编辑器快捷键库 |
+| ✨ **界面** | 深色 / 浅色双主题（可跟随系统），三栏布局，流式打字、计划时间线、工具卡片、代码高亮与一键复制 |
+
+### 界面速览
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/04-answer-demo.png" alt="智能体回答" /></td>
+<td width="50%"><img src="docs/screenshots/06-trace-panel.png" alt="执行轨迹" /></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/09-settings.png" alt="模型接入设置" /></td>
+<td><img src="docs/screenshots/08-knowledge-panel.png" alt="知识库面板" /></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/07-memory-panel.png" alt="长期记忆" /></td>
+<td><img src="docs/screenshots/11-screen-console.png" alt="屏幕演示控制台" /></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/light-01-welcome.png" alt="浅色主题" /></td>
+<td><img src="docs/screenshots/light-03-answer.png" alt="浅色主题回答" /></td>
+</tr>
+</table>
+
+---
+
+## 二、技术栈
+
+| 层 | 选型 | 说明 |
+| --- | --- | --- |
+| 编排 | **LangGraph** `StateGraph` | `plan → act ⇄ tools → answer` 的真实环形状态图 |
+| 模型适配 | **LangChain** `ChatOpenAI` | 统一走 OpenAI 兼容协议，一套代码接所有厂商 |
+| 后端 | **FastAPI** + Uvicorn | REST + SSE 流式，全异步 |
+| 数据库 | **MySQL 8**（SQLAlchemy 2.0 async + aiomysql） | 连不上时自动降级 SQLite，保证零配置可跑 |
+| 向量库 | **Qdrant**（官方 embedded local 模式） | `QDRANT_MODE=remote` 可无缝切到服务端 |
+| 前端 | **Vue 3** + Vite + Pinia + TypeScript | 组合式 API，无重型 UI 框架，全部手写设计系统 |
+| 屏幕控制 | mss + Pillow + pyautogui | 截图识别间隔可调，鼠标移到左上角可紧急中止 |
+
+---
+
+## 三、快速开始
+
+### 3.1 环境要求
+
+- Windows 10/11 / macOS / Linux
+- Python **3.10+**（开发验证于 3.12.6）
+- Node.js **18+** + pnpm（或 npm）
+- MySQL **8.0**（可选：没有会自动用 SQLite）
+- 不需要 Docker、不需要单独部署 Qdrant
+
+### 3.2 一键启动（Windows，最简单）
+
+双击根目录的 **`start.bat`**，它会自己做完下面这些事：
+
+1. 没有 `.venv` 就建一个（有 `uv` 用 `uv`，没有就 `python -m venv`）
+2. 依赖没装、或 `requirements.txt` 改过就装一遍（默认源失败自动换清华镜像；uv 建的 venv 没有 pip 也能装）
+3. 端口被占用自动往后找一个，**已经跑着本程序就直接开浏览器，不会起第二个**
+4. 等 `/api/health` 通了自动打开浏览器
+
+```
+√ Python 环境就绪
+√ 依赖已就绪（requirements.txt 没变）
+√ 服务已就绪：http://127.0.0.1:8000
+```
+
+关掉窗口即停止服务。参数：`start.bat -Port 8100` / `-NoBrowser` / `-Reinstall` / `-Mirror`（网络慢就直接走清华镜像）。
+
+> 等价命令：`powershell -ExecutionPolicy Bypass -File scripts\start.ps1`
+> （`start.bat` 只是替你把执行策略和双击这两件事处理掉）
+
+### 3.3 手动分步启动（要改代码时用）
+
+```powershell
+# 1) 后端
+cd backend
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+
+# 2) 前端开发服务器（热更新，另开一个终端）
+cd frontend
+pnpm install
+pnpm dev            # http://127.0.0.1:5173
+
+# 3) 或者一条命令起后端 + 前端开发服务器
+.\scripts\start-all.ps1
+```
+
+> 只想看效果：先 `cd frontend && pnpm build`，之后直接访问 <http://127.0.0.1:8000>（后端会把 `frontend/dist` 一起托管），
+> 包里自带构建好的 dist，所以 `start.bat` 不用装 Node。
+
+### 3.4 关于模型
+
+**第一次启动需要配一个 Key**（不再提供「内置演示模型」——它只会返回写死的假回答，测不出真实问题）。
+没配时界面直接提示去配置，不会假装能跑。
+
+接入真实模型：点左下角模型芯片 → 「模型接入」→ 填 Key → 点 **「保存并启用」**
+（一步完成「加密落库 + 切换过去」；只想验证 Key 就先点「测试连接」，通过后会顺手保存）。
+
+| 供应商 | Base URL | 常用模型 |
+| --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` / `deepseek-reasoner` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-max` / `qwen-vl-max`(视觉) |
+| OpenAI 兼容 | `https://api.openai.com/v1` | `gpt-4o-mini` / `gpt-4o`(视觉) |
+| Ollama 本地 | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` / `qwen2.5vl:7b`(视觉) |
+| 自定义 | 任意 `/chat/completions` 端点 | LM Studio、vLLM、one-api… |
+
+**模型列表是运行时拉取的**：保存好 Key 后，后端会请求该供应商的 `GET /models`（Ollama 用 `/api/tags`），
+把账户里真实可用的模型合并进下拉框 —— 厂商上新模型（例如 DeepSeek 的 V4 系列）不需要改代码就能出现。
+拉不到时会退回内置推荐，模型名也支持**手动填写任意值**（在「模型接入」的对话模型输入框里直接敲）。
+
+Key 用 Fernet 对称加密后存进 MySQL，密钥文件在 `data/.fernet.key`，
+接口只回传 `sk-abc****4567` 形式的掩码，重启后自动解密即用。
+
+### 3.5 配置项
+
+复制 `.env.example` 为 `.env` 按需修改，常用：
+
+```ini
+DATABASE_URL=mysql+aiomysql://root:root@127.0.0.1:3306/code_mentor?charset=utf8mb4
+QDRANT_MODE=local            # local | remote
+EMBEDDING_PROVIDER=auto      # auto=离线哈希向量；api=在线 Embedding；local=sentence-transformers
+EMBEDDING_DIM=512
+AGENT_MAX_ITERATIONS=6
+AGENT_FS_TOOL=true           # 只读文件工具开关
+FS_ROOTS=                    # 额外允许的根目录，分号分隔
+SCREEN_INTERVAL_MS=3000
+SCREEN_DRY_RUN=false
+```
+
+---
+
+## 四、目录结构
+
+```
+homework2/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                 # FastAPI 入口、生命周期、静态托管
+│   │   ├── core/                   # 配置 / 日志 / 加密 / 异常 / 事件总线 / 全局状态
+│   │   ├── db/                     # 异步引擎、ORM 模型（11 张表）
+│   │   ├── llm/                    # 供应商注册表、模型解析、连通性测试
+│   │   ├── agent/
+│   │   │   ├── graph.py            # ★ LangGraph 状态图（plan/act/tools/answer）
+│   │   │   ├── runtime.py          # 一次运行的全部依赖
+│   │   │   ├── prompts.py          # 三段式提示词
+│   │   │   ├── demo.py             # ★ 阶段六：演示可用性判定
+│   │   │   └── tools/builtin.py    # ★ 5 个工具（含异常自愈契约）
+│   │   ├── rag/                    # 切片器、Embedding、Qdrant 封装、内置知识包
+│   │   ├── memory/                 # 短期上下文 + 滚动摘要 + 长期记忆
+│   │   ├── screen_agent/           # 截屏、动作执行器、演示控制器
+│   │   ├── services/              # ★ chat_service 编排 + env_install 一键安装 + default_apps 关联识别
+│   │   ├── api/routes/             # 10 组 REST 接口
+│   │   └── schemas/                # Pydantic 入参出参
+│   ├── tests/test_units.py         # 56 个单元测试
+│   ├── tests/test_env_manager.py   # 21 个环境管家单元测试
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   ├── App.vue                 # 三栏布局
+│   │   ├── components/             # 侧边栏 / 消息 / 输入框 / 面板 / 弹窗（含设置-环境）
+│   │   ├── stores/                 # Pinia：app / screen / ui
+│   │   ├── api/client.ts           # REST + SSE 流解析
+│   │   ├── styles/global.css       # 设计系统
+│   │   └── utils/                  # markdown 渲染、格式化
+│   └── scripts/                    # 无头 Chrome 自动截图（screenshot / shoot-env / shoot-initial）
+├── start.bat                       # ★ 双击即可启动（建环境 + 装依赖 + 起服务 + 开浏览器）
+├── scripts/                        # start.ps1 一键启动、start-* 开发模式、冒烟测试、打包
+├── release/                        # 打好的「初始版」zip
+├── docs/                           # 架构设计、视频脚本、验收对照、截图
+├── data/                           # 运行时数据（SQLite 回退、Qdrant、截图、上传）
+├── docker-compose.yml              # 可选：MySQL + Qdrant 容器
+└── .env.example
+```
+
+---
+
+## 五、核心设计
+
+### 5.1 自主规划：LangGraph 状态图
+
+```
+        ┌────────┐
+START → │  plan  │  输出 JSON 计划（2~4 步）
+        └───┬────┘
+            ↓
+        ┌────────┐  有 tool_calls
+        │  act   │ ───────────────┐
+        └───┬────┘                ↓
+            │ 无工具调用       ┌────────┐  还有轮次 → 回 act
+            ↓                  │ tools  │ ─────────────┐
+        ┌─────────┐ ←──────────└───┬────┘              │
+        │ answer  │ ←──────────────┘ 轮次用尽/超预算    │
+        └────┬────┘                                    │
+             ↓                                          │
+            END  ←───────────────────────────────────────┘（轮次未用尽时）
+```
+
+代码：`backend/app/agent/graph.py`。每个节点都会通过 `emit()` 把事件推给 SSE，
+前端因此能实时渲染「任务规划 → 执行第 N 轮 → 工具调用 → 生成讲解」的完整链路。
+
+### 5.1.1 时延优化：一轮对话从 4 分钟压到 30 秒
+
+慢的本质不是代码，而是**串行的模型往返次数**。一轮回答原本至少要 `plan + act + act + answer`
+四次全量 prefill，每次 5~30s，再乘上工具轮次就是几分钟。做了六件事：
+
+| 优化 | 做法 | 效果 |
+| --- | --- | --- |
+| **工具并行** | `tools_node` 用 `asyncio.gather` 并发执行，不再 for-await 串行 | 3 个工具从「求和」变「取最大」，实测 3 个工具共 0.36s |
+| **少走一轮** | 工具执行完若轮次用尽，**直接进 answer**，省掉"再问模型要不要调工具"那次调用 | 固定调用数 4 → 3 |
+| **通信复用** | `build_chat_model` 加进程内客户端缓存，同参数复用连接池 | 省掉每次调用的 TCP/TLS 握手 |
+| **规划器瘦身** | JSON 模式 + `max_tokens=500` + `temperature=0.1` | 规划更快、解析更稳（不支持 JSON 模式自动回退） |
+| **证据瘦身** | 给 answer 的工具证据从 1500 字/条压到 420 字/条 | 首字前 prefill 明显变短 |
+| **快车道** | 寒暄跳过 plan+act；短概念题跳过 plan 且**直接检索**再作答 | 问候 1 次调用、概念题 2 次调用 |
+| **预算与轮次** | `agent_tool_rounds`（默认 1）、`agent_budget_s`（默认 90s）双保险 | 杜绝"一轮跑 4 分钟" |
+
+实测（同一问题、同一个模型 `qwen3.8-flash`）：
+
+| 场景 | 优化前 | 优化后 |
+| --- | --- | --- |
+| 「你好」 | ~3 次往返 | **6.7s**（首字 2.7s） |
+| 「什么是闭包」 | ~4 次往返 | **12.3s**（首字 6.5s） |
+| 装饰器 + 跑代码 | 211 ~ 274s | **27.1s**（首字 17s） |
+
+另外两个开关在「设置 → 运行参数」：`关闭思维链`（通义 Qwen3 系列生效，思考型模型单跳 20s+
+可降到几秒）和 `单轮时间预算`。
+
+### 5.2 工具异常自愈
+
+所有工具遵守同一条契约——**永不把异常抛给编排层**：
+
+```python
+return json.dumps({"ok": False, "error": "...", "hint": "..."})
+```
+
+`tools_node` 还有第二层 `try/except` 兜底（工具自身炸了也不会中断整轮）。
+模型收到 `ok:false` 后会在回答里自然说明「我这边查库/跑代码没成功」并给替代方案，
+前端同时把该工具标红并展示错误原因。验证用例：提交 `os.system('...')` 会被沙箱拒绝，
+整轮对话仍然正常产出答案。
+
+### 5.2.1 两个智能体怎么互通
+
+对话智能体和屏幕智能体原本各跑各的：你在对话里说「我屏幕上这个报错」，它其实什么都没看见，
+生成的演示指令自然容易跑偏。现在有一条双向通道（`screen_agent/context.py`）：
+
+| 方向 | 机制 |
+| --- | --- |
+| 对话 → 屏幕 | 新工具 **`look_at_screen`**：截一张当前屏幕交给视觉模型，回答「报错是什么 / 当前开着哪个文件」 |
+| 屏幕 → 对话 | 观察结果写进共享上下文，下一轮提示词自动带上「前台应用 + 看到的画面 + 细节」 |
+| 屏幕演示 | 演示开始时也读同一份上下文，模型知道「你刚才就在 VS Code 里」，指令能落到具体窗口 |
+
+保护措施：
+
+- **限流**：同一用户 8 秒内只允许看一次屏幕，防止模型刷屏截屏；
+- **TTL**：观察结果 5 分钟过期，避免用旧画面误导（过期后提示词里不出现）；
+- **可关**：设置 → 运行参数 →「允许对话智能体看一眼屏幕」，关掉后该工具直接不绑定；
+- **只做描述**：视觉模型的系统提示是「只客观描述、不给操作建议」，避免两套决策打架。
+
+实测（用一张合成的测试截图验证，不涉及真实桌面）：
+
+```json
+{"ok": true, "app": "msedge",
+ "summary": "当前处于 CodeMentor Screen Test 的屏幕测试界面，正在显示一段程序运行时的错误信息。",
+ "details": "报错的文件位置为 File: demo.py Line 12。 / 具体的红色报错文字内容为 NameError: name x is not defined。",
+ "screenshot": "/static/screenshots/shared/1793789765696.png"}
+```
+
+### 5.3 RAG 细节
+
+- **切片**：按标题/空行切 700 字块，**代码围栏整体保留**，长度按还原后的真实文本计算
+- **向量**：默认离线哈希向量（中文 1~2 字滑窗 + 英文标识符哈希到 512 维，L2 归一化），
+  不依赖外网；配置 `EMBEDDING_PROVIDER=api` 可切到 `text-embedding-v3` 等在线模型
+- **检索**：向量召回 Top-K×4 → 用 `0.62×余弦 + 0.38×关键词重合` 重排 → 取 Top-K
+- **存储**：Qdrant 两个集合 `code_knowledge` / `long_term_memory`，payload 里带
+  `doc_id / title / source / tags / chunk_index / text`
+
+### 5.4 双层记忆
+
+| 层 | 位置 | 策略 |
+| --- | --- | --- |
+| 短期 | `memory/service.py::build_context_messages` | 取最近 12 条消息 + 会话摘要，作为本轮上下文 |
+| 摘要 | `maybe_summarize` | 消息数超过阈值时用 LLM 压缩成 200 字摘要，控制上下文长度 |
+| 长期 | `extract_candidate_memories` | 用模式规则从用户话里抽取「偏好/画像/目标/事实」 |
+| 召回 | `recall_memories` | 先用 Qdrant 语义召回，命中后按 id 回查 MySQL 过滤，最后更新访问计数 |
+
+### 5.5 屏幕演示（阶段五 / 六）
+
+```
+截图(mss) + 0~1000 坐标网格 → JPEG data URL
+      ↓
+视觉模型（只回 JSON：thought + action + done）
+      ↓
+动作规范化（键名别名/组合键拆分/序列校验）→ 执行器
+      ↓
+ScreenStep 落库（先写 pending 再执行）→ SSE 广播 → 前端时间线
+```
+
+**支持的动作**（`screen_agent/actions.py`）：
+
+| 类别 | 动作 | 说明 |
+| --- | --- | --- |
+| 鼠标 | `click` / `double_click` / `right_click` / `move` / `drag` / `scroll` | 坐标 0~1000 归一化，按真实分辨率还原 |
+| 键盘 | `key` / `hotkey` | 单键 enter/esc/tab/f1-f12/方向键…；组合键写 `["ctrl","shift","p"]` 或 `"win+r"`、`"alt-tab"` 都能解析 |
+| 批量 | `sequence` | 一次执行 2~6 个可预期动作，如「Win+R → 输入 notepad → 回车」 |
+| 文本 | `type` | 中文自动走 Win32 剪贴板 + Ctrl+V |
+| 其它 | `wait` / `done` | 等待界面加载 / 结束演示 |
+
+**让它「更聪明」的四个设计**：
+
+1. **快捷键优先**：系统提示词里内置了一张「Win+R / Win+E / Win+D / Alt+Tab / Win+Tab /
+   Ctrl+Shift+Esc / Ctrl+Shift+P / Ctrl+S…」工具箱，并明确要求「能用快捷键就别猜坐标」。
+   猜坐标是视觉模型最容易失败的动作，用 Win+R 打开程序比在开始菜单里找图标稳得多。
+2. **坐标网格**：送给模型的截图会叠加 10×10 的青色网格和 0~1000 刻度，模型可以直接读数；
+   存盘给界面看的是不带网格的原图。
+3. **上下文与防呆**：提示词带上最近 3 步的「动作 → 结果」和「当前应该推进到哪一步」；
+   同一动作连续 3 次没让界面变化就自动暂停，而不是一直原地点击。
+4. **容错**：模型给出非法键名/缺坐标时，`normalize_action` 抛出可读错误 →
+   本轮降级为 `wait` 并在 thought 里写明原因，会话不会崩；模型把 action 写在顶层也能解析。
+
+**「识别间隔」到底是什么**：控制台滑杆（`SCREEN_INTERVAL_MS`，0.8~10s）是**每轮决策的目标周期**，
+不是图片上传排队间隔。一轮是「截图 → 送模型 → 执行动作 → 等待」，等待时间是
+`max(0.25s, 间隔 − 本轮已耗时)`，所以模型慢时不会再多等一整个间隔。
+每一步都会重新截一张完整截图（缩放到 1024 宽、JPEG q65）送给视觉模型，没有图片复用或缓存。
+
+**让屏幕演示更快**（模型慢时尤其明显）：
+
+| 手段 | 说明 |
+| --- | --- |
+| 输出上限 | 决策输出 `SCREEN_MAX_TOKENS=320`（动作 JSON 本来就很短），生成时间大幅缩短 |
+| 关思维链 | 通义 Qwen3 系列自动带 `enable_thinking=false`（不支持的模型自动回退普通调用） |
+| 缩图 | 1280 → 1024 宽、质量 72 → 65，视觉 token 少约 36%，首字更快 |
+| 自适应间隔 | 等待 = 间隔 − 本轮耗时，避免"模型 8s + 再等 2s"的叠加 |
+| 换视觉模型 | 「设置 → 模型接入」里的 `vision_model` 与聊天模型独立，可单独指定更快的多模态模型 |
+
+**输入法导致的乱码，三层防护**（`screen_agent/actions.py`）：
+
+| 层 | 做法 | 解决什么 |
+| --- | --- | --- |
+| ① | 文本输入默认走 **剪贴板 + Ctrl+V**（`SCREEN_TYPE_MODE=clipboard`），不再用 `pyautogui.write` 逐字敲 | 输入法完全不参与：不会有全角字符、丢字、候选框吞回车 |
+| ② | 落键前把代码里的 **全角标点纠正成半角**：`print（"hi"）；` → `print("hi");` | 模型自己吐全角、或上一次粘贴带进来的脏字符；中文散文不会被误改 |
+| ③ | 演示期间尝试把前台程序 **切到英文输入法**（Win32 IMM，结束自动还原，可在控制台关掉），提示词里还要求「输入后自检，不一致就 Ctrl+A 整段重输」 | 只对必须回退到模拟按键的情况兜底 |
+
+> 实测：`ImmGetContext` 对 Edge / VS Code 返回空（它们用 TSF 而不是 IMM），所以 ① + ② 才是主防线，
+> ③ 是加分项；界面会如实提示「当前程序不支持自动切输入法」。
+
+**会踩坑、会记路：经验库**（`screen_agent/memory.py` + `screen_lessons` 表）
+
+以前它会在同一个失效操作上反复试几次；现在每一步都用「下一帧画面变没变」来判卷：
+
+| 判定 | 处理 |
+| --- | --- |
+| 画面变了 | 记为**有效做法**（按前台应用分域），下次同款应用优先复用 |
+| 画面没变 | 记为**无效做法**，立刻进本次会话的禁用表，再出现就直接跳过 |
+| 同一动作重复 | 不等三次：第二次就判失效并跳过；指纹按 100×100 像素归一，抖动几十像素算同一个动作 |
+| 连续 3 次无效 | 自动暂停，把控制权交回你 |
+
+经验会回灌到提示词：「已验证有效，优先复用」「已验证无效，不要再试」；系统提示词里也写明了
+**预设步骤只是参考路线，走不通就跳过或换路线**，不再死板按步骤走。
+
+**从对话里学**：你说过「用 Ctrl+Shift+P 打开命令面板」，创建演示时会自动提取成经验
+（只认带指令动词的，避免把「Ctrl+S 是保存」这种顺口一提也记进去）。
+
+控制台底部有「🧠 经验库」面板，能看到学到了什么、也能一键清空；接口
+`GET /api/screen/lessons`、`DELETE /api/screen/lessons`。
+
+阶段六的两个硬约束都落在代码里：
+
+1. **只有「有效编程内容」才允许弹出启动入口**
+   `agent/demo.py::analyze` 综合打分：有代码块 +3、有编号步骤 +2、有动手动词 +2、
+   工具成功 +1、计划要求演示 +1，`score ≥ 4` 且（有代码 或 ≥2 个步骤）才 `available=True`。
+   纯理论回答（如「装饰器是闭包」）会明确显示「本轮不提供屏幕演示」。
+2. **暂停必须记住当前步骤**
+   每步先把 `current_step` 与 `ScreenStep(pending)` 落库，再执行动作；
+   暂停只是清掉 `asyncio.Event`，恢复时从 `current_step` 继续；
+   服务重启时 `recover_stale()` 把 `running` 的会话标记为 `paused`，日志文案提示可从第 N 步续跑。
+
+### 5.7 外观：三档主题 + 自定义背景
+
+设置弹窗现在是四个页签：**模型接入 / 外观 / 运行参数 / 关于**，视觉相关的东西全部收进「外观」。
+
+**背景画面**：支持图片和循环视频（自动静音、`loop`、`playsinline`）。
+
+| 能力 | 说明 |
+| --- | --- |
+| 素材库 | 上传过的图片/视频以缩略图排在面板里，点一下即应用；悬停可删除 |
+| 实时预览 | 左侧预览与右侧控件**等高排布（约 1:1 的方正比例）**，里面按真实布局画出**侧栏 / 主区 / 右栏线框**——圆点和色块占位，不画具体图标文字；点「放大」可铺满整宽 （16:9）。模糊、遮罩、画面不透明度、左右栏不透明度都所见即所得 |
+| 外部 URL | 直接填 `https://.../loop.mp4`，按后缀自动判断图片还是视频 |
+| 五个滑杆 | 模糊 0~40px、遮罩 0~80%、画面不透明度 10~100%、**左栏不透明度**、**右栏不透明度**（两栏独立） |
+
+文件落盘在 `data/backgrounds/`（≤60MB，后缀白名单 + UUID 命名），本地只存 URL 和这五个数值，
+所以换浏览器也不会丢配置；点「无」立刻恢复原来的渐变底。
+
+**半透明怎么生效**：启用后根节点打上 `html[data-bg="on"]`，全局表面 token 换成半透明版本
+（`--surface / --panel-bg / --composer-bg / --bubble-bg / --dialog-bg`），
+气泡、输入框、弹窗走毛玻璃，侧栏与右侧面板则**直接透出清晰画面**，透明度由各自的滑杆控制。
+
+| 关注点 | 做法 |
+| --- | --- |
+| 只改 token 不改组件 | 面板本来就用同一套 CSS 变量，重定义变量即可全局生效 |
+| 两栏各自可调 | `--panel-alpha-left` / `--panel-alpha-right` 两个变量，互不干扰 |
+| 亮图也能看清 | 媒体层之上压一层可调遮罩（深色黑 / 浅色白），文字再加极淡投影 |
+| 视频不抢焦点 | 背景层 `pointer-events: none` + `aria-hidden`，不进交互也不进读屏 |
+| 配置只在本地 | 主题与背景参数存 localStorage，素材文件在后端，两边解耦 |
+
+截图见 `docs/screenshots/25-bg-welcome.png`（首页）、`26-bg-settings.png`（外观页）、
+`27-settings-runtime.png`（运行参数页）。
+---
+
+### 5.8 本机文件：只读，改动一律走键鼠
+
+屏幕智能体靠"看"找不到文件，所以补了一组**文件系统工具**（`agent/tools/files.py`）：
+
+| 工具 | 能力 |
+| --- | --- |
+| `list_dir` | 列目录（名字/类型/大小/时间）；**path 留空会直接返回所有允许的根目录**，避免模型猜 `C:\Users` |
+| `find_files` | 按名字搜**文件和文件夹**，返回绝对路径；多盘并行 + 时间预算（默认 8s，可调 2~25s）；装了 Everything（`es.exe`）则毫秒级全盘 |
+| `list_drives` | 枚举所有磁盘（盘符 / 类型 / 容量 / 是否可读），搜不到时先看它，再带 `root="I:\"` 精确搜 |
+| `read_file` | 只读预览文本（≤200 行 / ≤2MB），用来确认「是不是这个文件」 |
+| `open_path` | 用默认程序打开（**拒绝 exe/bat/ps1/lnk 等可执行与脚本**） |
+| `reveal_in_explorer` | 打开资源管理器并选中文件，讲课时指给学习者看 |
+
+**为什么只读**：写入、删除、重命名这类操作**一律不给**。要改文件只能走「屏幕演示」——
+视觉模型驱动键盘鼠标在真实界面里操作，学习者全程看得见、随时能暂停。这条边界写在
+代码（没有写接口）、提示词（明确禁止直接改）、UI（开关叫"只读"）三处。
+
+安全边界：
+
+| 措施 | 说明 |
+| --- | --- |
+| 根目录范围 | 默认放开**所有磁盘**（`fs_allow_all_drives`，只读），可在设置里关掉退回白名单；另外始终拒绝系统目录和别人的用户目录 |
+| 系统目录拒绝 | `C:\Windows`、`Program Files`、`ProgramData`、回收站等直接拒 |
+| 路径规范化 | `resolve()` 之后再比对白名单，`..\..\` 穿越绕不过去 |
+| 可执行拦截 | `open_path` 遇到 exe/bat/ps1/lnk 等直接拒绝并提示改走屏幕演示 |
+| 用量限制 | 单次最多 200 条、扫描上限 2 万项、深度 ≤6，不会把整盘扫爆 |
+
+**多段式任务**：文件类工具（列目录/搜索/打开）几乎不耗时，所以轮次用尽时系统会额外放行一到两轮，让「先搜索 → 再打开」这种流程能走完，而不是搜到就断。
+
+**和屏幕演示打通**：本轮用文件工具定位到的绝对路径会记进 `ctx.paths`，
+`propose_screen_demo` 会把它们一起返回（`known_paths`）。屏幕侧拿到路径后直接
+`Win+R → 输入路径 → 回车`，比在资源管理器里逐层点图标稳得多。
+
+#### 控件树（UI Automation）：不靠看，直接问 Windows
+
+截图 + 估坐标本质是在像素里猜。Windows 的 UIA 直接把「这个按钮叫什么、在哪个矩形」交出来，
+点击就退化成「取矩形中心」。这是从参考项目 `dsh-pilot`（`_dsh-uia.ps1`）学来的思路，
+这里用纯 Python 的 `uiautomation`（ctypes 直连，无需 .NET）。
+
+| 动作 | 作用 |
+| --- | --- |
+| `{"type":"controls"}` | 读前台窗口的控件树（可带 `title` 指定窗口），结果下一轮注入提示词 |
+| `{"type":"click_control","index":14}` | 点击 14 号控件的矩形中心（换算成归一化坐标后走原有安全链路） |
+| `{"type":"invoke_control","index":14}` | InvokePattern 直接触发，等价点击但完全不受坐标影响 |
+| `{"type":"set_control","index":7,"text":"..."}` | ValuePattern 直接赋值，**彻底绕开输入法** |
+
+实测（资源管理器窗口，53ms）：
+
+```
+[ 5] Button '返回到 dsh-pilot (Alt + 向左键)' @ 93,312 45x45
+[ 6] Button '前进 (Alt + 向右键)'            @ 138,312 45x45
+[ 9] Button '上移到“homework2”(Alt + 向上键)' @ 208,317 36x36
+[13] Pane   '文件夹布局窗格'                  @ 87,360 1925x898
+```
+
+**边界**：浏览器网页内部、游戏画面通常拿不到控件树（浏览器默认不开 renderer 无障碍），
+那些场景仍走截图 + 网格 + zoom。
+
+#### 另外两条来自参考项目的加固
+
+1. **per-monitor DPI v2**：抓屏和点击都必须声明同一套 DPI 感知，否则 2560×1600 会被系统
+   报成 1707×1067，算出来的点击必然偏。现在 `capture.py` / `actions.py` 在导入 mss / pyautogui
+   之前统一声明（实测 `per-monitor`，两边都读到 2560×1600）。
+2. **落点校验**：每次点击后读一次真实光标位置，偏差超过 3px 就在结果里写
+   「⚠️光标实际落在 (x, y)，偏差 (+dx, +dy)，坐标可能被缩放假偏」——把「点不准」变成可观测的信号。
+
+#### 定位精度：字够大，是网格太粗
+
+实测这台机器是 **2560×1600 @ 150% 缩放**（`GetDeviceCaps(LOGPIXELSX) = 144`）。
+换算下来字并不小：
+
+| UI 字号(逻辑) | 物理像素 | 缩到 1568 后图内 |
+| --- | --- | --- |
+| 12px | 18px | 11.0px |
+| 14px | 21px | 12.9px |
+| 16px | 24px | 14.7px |
+
+所以「认不出字」不是主因，**真正的短板是坐标精度**：旧的 10×10 网格每格 256 物理像素
+（约 45mm），而一个工具栏图标只有 24~36px——模型要在比目标大 7 倍的格子里估位置，
+偏一格就是几十像素，自然点空。
+
+三处改动：
+
+1. **网格加密到 20×20**：每格 128px，粗线每 100、细线每 50，瞄半格也有依据
+2. **重试时自动放大 + 红色准星**：第二次失败不再盲点，而是把刚才那块区域放大，
+   并在图中画出「上次点击位置」的准星——模型能直接看到偏了多少，据此修正坐标
+3. **放大视图的网格数字仍是全屏 0~1000**，坐标不用换算
+
+另外截图宽度保持 1568（不是 1024），JPEG 质量 85，避免文字边缘振铃。
+
+#### 节奏控制：抓帧快、思考慢
+
+| 参数 | 默认 | 作用 | 性质 |
+| --- | --- | --- | --- |
+| `screen_capture_ms` | **200ms**（可低至 100） | 抓帧节奏，用来判断界面有没有变 | 便宜，~50ms |
+| `screen_interval_ms` | **5000ms** | 两次「问模型」之间的最小间隔 | 贵，2~8s |
+| `screen_skip_unchanged` | 开 | 画面完全没变就不调模型（连续 8 次约 4s 强制问一次） | — |
+
+两者独立：**抓帧可以很快，送模型要慢**。而且循环是串行的——一次决策没返回，根本不会抓下一帧，
+所以不存在「还没想完又把新画面塞进去」。
+
+实测（决策间隔 5000ms、模型耗时 0.3s）：
+
+```
+13 秒内模型调用 3 次，间隔 [5.26s, 5.01s]
+```
+
+#### 一帧内的思考循环
+
+```
+抓一张截图
+  → 思考：要不要先取证？
+      ├ probe: controls（读控件树）
+      ├ probe: windows（列窗口）
+      └ probe: value #7（读输入框内容）
+  → 取证结果累积在 frame_context，重新思考（最多 3 轮）
+  → 给出一个动作 → 执行 → 等界面稳定 → 抓下一帧（frame_context 清空）
+```
+
+实测一帧内思考 2 轮：模型调用 3 次、抓帧 2 次，帧内上下文条数 `[0, 1, 0]`（换帧清空）。
+
+#### 中断与强制停止
+
+**演示什么时候会停**——原则是「**不轻易暂停，只有模型出错才中断**」：
+
+| 触发 | 状态 | 说明 |
+| --- | --- | --- |
+| 视觉模型调用失败（网络/限流/超时） | 中断（failed） | 这是唯一的强制中断条件，进度已落库 |
+| 模型自己认为目标达成 | 完成 | 正常结束 |
+| 达到最大步数 | 完成 | 兜底，默认 200 步 |
+
+**操作没反应怎么办**——不再暂停，而是按阶梯重试：
+
+```
+操作后画面没变化
+  → 等 5 秒，原地再执行一次
+  → 还没变化，等 10 秒，再执行一次
+  → 仍然没变化（累计约 15 秒），判定这个做法作废
+     · 记进本次会话的禁用清单
+     · 给模型一条强指令「必须换方案」（换快捷键 / 换入口 / 先 esc 回稳）
+     · 继续跑，不暂停
+```
+
+界面上会依次看到：「暂时没让界面变化，等 5 秒后原地重试一次」→「已重试（第 1 次）」
+→「等 10 秒后原地重试」→「等了 15 秒仍无变化，已弃用，接下来换一种做法」。
+
+**全局强制停止**：`Ctrl+Alt+Shift+F12`（可在设置里改）。用 Win32 `RegisterHotKey` 注册，
+不抢焦点、不改键鼠状态，任何窗口下都生效；按下后所有演示立即停止并保存进度（可续跑）。
+另外 `pyautogui` 的 FAILSAFE 仍然有效——鼠标甩到屏幕左上角也能中止。
+
+### 5.9 提示知识（guide）与本机环境画像
+
+知识库里其实有两种东西，用 `kind` 区分：
+
+| 类型 | kind | 去向 | 用途 |
+| --- | --- | --- | --- |
+| 知识文档 | `doc` | 切块后进 Qdrant，被 `knowledge_search` 语义检索 | 回答「是什么 / 怎么做」 |
+| **提示知识** | `guide` | **不进向量库**，每轮原样注入系统提示词 | 约束模型「怎么做事的」 |
+
+提示知识再按 `target` 分发给不同智能体：
+
+- `chat` → 注入规划器与执行器的系统提示词；
+- `screen` → 拼在屏幕智能体的 SYSTEM_PROMPT 后面；
+- `both` → 两边都给。
+
+在「知识库」面板点「+ 新增」，选「🧭 提示知识」，再选作用对象就能写。例子：
+
+```
+屏幕操作：优先快捷键 + 先确认窗口
+- 打开程序优先 Win+R 输入完整路径，不要在开始菜单里找图标
+- 每次点击前先确认截图里的窗口标题是否是目标程序
+- 输入代码后立即 Ctrl+S 保存，再运行
+```
+
+**本机环境画像（自动生成）**：每次启动会采集当前机器信息，写进一条 `target=chat`
+的提示知识（`source=system-profile`），内容包括系统版本、Shell、Python 版本、
+虚拟环境写法、包管理器、数据库/向量库配置，以及一段硬约束：
+
+> 只给 Windows 的做法；不要给 `apt` / `brew` / `sudo` / `export` / `/usr/local`；
+> 路径用反斜杠；环境变量用 `$env:NAME`；如果学习者确实问 Linux，要先点明系统差异。
+
+这样模型不会再拿 Linux/macOS 的命令来回答 Windows 的问题。实测提问「怎么用命令行安装依赖并设置环境变量」，
+回答里 `pip install` + `$env:EXAMPLE_KEY` + PowerShell，`apt/brew/sudo/export` 一个都没出现。
+
+#### 旧式 XML 工具调用兼容
+
+部分模型（Qwen 系在个别 OpenAI 兼容端点上）会退化成下面这种**纯文本**调用格式，而不是
+标准 `tool_calls` 字段：
+
+```
+<tool_call>
+<function=list_dir>
+<parameter=path>
+E:\项目\demo
+</parameter>
+</function>
+</tool_call>
+```
+
+不处理的话有两个后果：这段标签会被当成答案流式输出（界面上一堆乱码），本该执行的工具也不执行。
+现在两层兜底（`agent/xml_calls.py`）：
+
+| 机制 | 作用 |
+| --- | --- |
+| `parse_legacy_tool_calls()` | 在 `act` 节点检测到这种文本时，解析成结构化调用照常执行，并提示"已自动转换" |
+| `LegacyTagFilter` | 流式过滤，答案里永远不会出现 `<tool_call>` / `<parameter>` 标签（支持跨 chunk 的半个标签） |
+
+顺带两处加固：
+
+- 工具参数改成**内部钳制**而不是 schema 硬校验：`depth=6`、`lines=500`、字符串 `"3"` 都不会再报
+  ValidationError，超范围自动截断（写死 `le=3` 时模型给 6 会直接失败）
+- 空知识库检索不再算失败：返回 `ok + count=0 + 提示`，界面不飘红，模型也不会反复重试
+
+#### 轮次与递归上限
+
+「先把项目读一遍再回答」这类任务要连读十几个文件。文件工具单次只要 ~10ms，所以：
+
+- 便宜工具（列目录/搜索/读文件/打开）的轮次上限 3 → **6**
+- LangGraph `recursion_limit` 从 `max(8, iters*3+6)` 改成 `max(40, iters*3+30)`：
+  原来的公式在快车道（`max_iterations=1`）下正好算成 9，读文件到一半就 `GraphRecursionError`，
+  用户看到的是"答了一句就没了"
+- 触发递归上限也不再抛错，而是用已收集的证据给出小结，不会让整轮对话失败
+
+### 5.11 联网搜索 / 原子步骤 / 中途提问 / 模型共用
+
+四个针对实际使用痛点的补强：
+
+**① 联网搜索（`web_search` + `web_fetch`）**——不依赖任何 API Key：
+
+| 工具 | 说明 |
+| --- | --- |
+| `web_search(query, count)` | 抓 cn.bing.com 结果页并解析，返回标题/链接/摘要；Bing 不可用时自动降级到搜狗 |
+| `web_fetch(url, max_chars)` | 抓网页正文、去 HTML 标签、截断 6000 字 |
+
+安全：只允许 http/https，**拒绝内网与本机地址**（`127.x`、`10.x`、`192.168.x`、`localhost`、`ftp://` 等），
+DNS 解析后还会再核一次，防止被诱导去扫本机端口。
+
+**② 演示步骤改成原子步骤**——以前「打开记事本，写点代码然后保存」是一整条，屏幕侧的模型只能猜。
+现在两道处理：
+
+- 提示词要求「对象 + 动作 + 预期结果」，一步一个动作；
+- 生成时再按 `，、；→ 然后 接着` 自动切分（`_split_step`），去掉序号、合并极短碎片，最多 8 步。
+
+**③ 演示中途可以向学习者提问（ask）**——模型卡住时不再瞎猜：
+
+```json
+{"type":"ask","question":"你的项目在哪个目录？","options":["E:\a","E:\b"]}
+```
+
+会话转为 `waiting`，界面弹出输入框与选项按钮；提交后答案写进上下文并自动续跑
+（`POST /api/screen/sessions/{id}/answer`）。提示词里也写清楚了「什么问题该问人、什么问题该自己判断」。
+
+**④ 屏幕演示的模型可选/可共用**：
+
+| 设置 | 效果 |
+| --- | --- |
+| `screen_share_chat_model=true` | 直接用对话侧那个模型（要求支持图片），两个智能体同一个脑子 |
+| `screen_model_override="qwen:qwen3-vl-plus"` | 显式指定 provider:model |
+| 都留空 | 自动挑该 provider 的多模态模型（原行为） |
+
+### 5.12 任务拆解：一次只做一件，做完不丢
+
+复杂需求（「装好环境、建项目、写接口、跑起来」）如果一口气做完，会糊成一片，屏幕演示也没法聚焦。
+现在走「拆解 → 单件执行 → 持久化」三步。
+
+**① 谁来拆**——两道保证：
+
+| 层 | 做法 |
+| --- | --- |
+| 系统兜底（不依赖模型听话） | 在 `runtime.create` 里用 `detect_multi_action()` 扫描提问：按 `、，；然后 接着 最后` 切句，含两个以上动作动词就自动拆成任务清单落库，并在提示词开头强加「**本轮只做第 1 件**」 |
+| 模型主动 | 提供 `plan_tasks(tasks[])` 工具，模型可自行细化（实测它会把我拆的 4 条改写成更准的 5 条） |
+
+**② 一件一件做**：提示词规定「单点操作直接做；多个操作先拆清单，本轮只做第 1 件，结尾告诉学习者还剩几件」。
+
+**③ 不丢**：任务存在 `agent_tasks` 表（conversation_id / idx / title / status），每轮对话都会重新读出来
+注入提示词，所以：
+
+- 关掉页面/重启后端再回来，清单还在；
+- 每轮开头模型都知道「现在做第几件、还剩几件」；
+- 界面输入框上方有「📋 任务清单 1/5」的折叠条，点一条就能标记完成。
+
+接口：`GET /api/conversations/{id}/tasks`、`PATCH /api/conversations/{id}/tasks/{idx}`。
+
+实测（同一句多任务需求）：
+
+| 指标 | 加拆解前 | 加拆解后 |
+| --- | --- | --- |
+| 工具调用 | 15 次 | 5 次 |
+| 耗时 | 187.8s | 76.5s |
+| 输出 | 一口气讲完四件事 | 只讲第 1 件（环境检查），末尾提示还剩 4 件 |
+
+### 5.13 模型接入：11 家供应商
+
+| 供应商 | 端点 | 代表模型 | 视觉 |
+| --- | --- | --- | --- |
+| DeepSeek | `api.deepseek.com/v1` | deepseek-chat / deepseek-coder | — |
+| 通义千问 DashScope | `dashscope.aliyuncs.com/compatible-mode/v1` | qwen3-max / qwen-plus / qwen3-coder-plus | **qwen3-vl-plus** 等 |
+| 智谱 GLM | `open.bigmodel.cn/api/paas/v4` | glm-4.6 / glm-4-flash（免费额度） | glm-4.5v |
+| 月之暗面 Kimi | `api.moonshot.cn/v1` | kimi-k2-0905 / moonshot-v1-128k | moonshot-v1-vision |
+| 火山方舟 豆包 | `ark.cn-beijing.volces.com/api/v3` | doubao-seed-1-6 | doubao-seed-vision |
+| 硅基流动 | `api.siliconflow.cn/v1` | DeepSeek-V3 / Qwen3-32B（托管） | Qwen2.5-VL-72B |
+| OpenRouter | `openrouter.ai/api/v1` | GPT-4o mini / Claude Sonnet 4 / Gemini 2.5 Pro | ✅ |
+| Groq | `api.groq.com/openai/v1` | llama-3.3-70b / qwen3-32b | Llama 4 Scout |
+| OpenAI | `api.openai.com/v1` | gpt-4o / gpt-4o-mini | ✅ |
+| Ollama（本地） | `127.0.0.1:11434/v1` | qwen2.5:7b / deepseek-r1:7b | qwen2.5vl:7b |
+| 自定义端点 | 任意 OpenAI 兼容 | LM Studio / vLLM / one-api | — |
+
+全部走 OpenAI 兼容协议，换供应商只改 base_url + Key。
+
+**内置演示模型（mock）已移除**：它只会返回写死的假回答，测不出真实问题。现在默认供应商是
+`deepseek`，未配 Key 时界面直接提示去配置，不再假装能跑。
+
+### 5.14 环境管家：先量体温，再一键装，最后告诉智能体你在用什么编辑器
+
+学编程的第一道坎往往不是语法，是环境：Python 装了没勾 PATH、JDK 版本对不上、Node 和工具链打架。
+「设置 → 环境」把这件麻烦事拆成三步：**检测 → 一键安装 → 默认打开方式**。
+
+#### ① 检测：24 个工具，约 1 秒扫完
+
+`GET /api/env/probe` 用 `shutil.which` 找到可执行文件，再跑一次版本命令确认能启动。
+24 个工具串行 spawn 要 2 秒以上，改成 8 线程并发后实测 1.0 秒（面板一打开就能看到结果）。
+
+| 分类 | 工具 |
+| --- | --- |
+| 语言 | Python、Node.js、JDK、Go、Rust、.NET SDK、PHP、Ruby |
+| 构建 | Maven、Gradle |
+| 数据库 | MySQL、PostgreSQL、Redis、SQLite |
+| 容器 | Docker、Docker Compose |
+| 工具 | Git、npm、pnpm、Yarn、pip、Conda、CMake、GCC |
+
+每张卡片给出：装没装、版本、路径（悬停看完整路径）、推荐版本、能不能一键装。
+
+#### ② 一键安装：两种来源，一个后台任务
+
+| 来源 | 适用 | 做法 |
+| --- | --- | --- |
+| **winget** | 有官方包的（Python / Node / JDK / Go / Redis / CMake / pnpm …） | `winget install --id X -e --silent --accept-package-agreements --accept-source-agreements`；支持自定义目录的包再加 `--location <安装根目录>/<工具>` |
+| **zip** | winget 没有官方包的（Maven / Gradle） | 下官方压缩包（Apache / Gradle 优先，带清华、阿里、腾讯镜像兜底）→ 解压（自动剥掉顶层目录）→ 写 PATH |
+
+点「一键安装」会弹一个**独立的二次确认弹窗**：显示将要执行的命令、安装位置，以及一个默认勾选的
+「装完自动加入 PATH（推荐，新终端直接能用）」。确认后转成后台任务，面板变成**阶段性进度条**：
+准备 → 下载/安装 → 解压 → PATH → 验证，每段是一个阶段，下载阶段还会按真实百分比推进；
+下面只有**一行小字**显示当前进度，完整输出收在「详细日志」里（见 `docs/screenshots/47-env-progress.png`）。
+
+**手动安装也是弹窗**（不再把卡片撑开）：最上方是官网入口（`go.dev/dl`、`gradle.org/releases` 这类），
+下面是可**一键复制**、也可**一键运行**的命令，再往下是步骤与提示。点「一键运行」走的是和「一键安装」
+同一条后台通道，所以照样有阶段进度、PATH 写入和版本验证；区别是日志第一行会写下
+「手动命令：<你看到的那条命令>」，方便对照它到底跑了什么。
+
+> 安全边界：`via=manual` 只是日志标记，**真正执行的命令永远来自服务端工具表**，
+> 客户端只能传 `tool_id` —— 否则这个接口就等于一个本地 shell。
+
+```
+下载 https://dlcdn.apache.org/…/apache-maven-3.9.16-bin.zip
+下载进度 33%（3.0 MB / 9.0 MB）
+解压完成
+找到可执行文件：D:\DevEnv\maven\bin
+已加入用户 PATH：D:\DevEnv\maven\bin
+验证通过：Apache Maven 3.9.16
+```
+
+几个实现上的关键点（对应 `services/env_install.py`）：
+
+- **HTTP 不等安装**：`POST /api/env/install` 只校验入参、登记任务、起线程，立刻返回 `job_id`；
+  前端用 `GET /install/{id}?since=N` 按游标拉增量日志，轻到可以每秒轮询。
+- **进度用阶段表达**：后端在任务里维护 `stage`（prepare → download/install → extract → path →
+  verify → done），前端按阶段权重画分段进度条；下载阶段再叠加日志里的百分比做细分，
+  其余阶段靠当前段的呼吸动画表示「还在跑」，面板上只留一行小字显示当前那行输出。
+- **进度条也是日志**：winget 用 `\r` 刷新进度，所以按 `\r\n|\r|\n` 切分二进制流，再按
+  utf-8 → gbk → latin-1 依次解码（中文 Windows 上很常见）；完整输出放在「详细日志」折叠里。
+- **终态最后才置**：找 exe、写 PATH、`--version` 验证这些收尾动作跑完，才把 `status` 改成
+  `succeeded`；否则前端一看到终态就停轮询，正好漏掉最重要的几行。
+- **PATH 要小心**：写之前备份到 `data/env_path_backup.json`，写回时保留原类型
+  （`REG_EXPAND_SZ` 写成 `REG_SZ` 会把 `%USERPROFILE%` 固化），最后广播 `WM_SETTINGCHANGE`；
+  安装程序自己已经加过的目录不会重复追加。
+- **装完立刻可用**：把注册表 PATH 同步回后端进程，验证才不会被「环境变量没刷新」骗到。
+- **Java 顺手设 `JAVA_HOME`**（指向安装根目录而不是 `bin`），很多构建工具只认它。
+- **并发只允许一个**：两个安装程序同时改 PATH 很容易互相覆盖，第二个请求直接 409 + `ok:false`。
+
+失败路径也都是结构化响应：没 winget、工具没有可自动安装的来源、并发冲突、任务不存在，
+一律 `{ok:false, code, message, hint}`，前端弹 toast 而不是转圈。
+
+#### ③ 默认打开方式：读注册表，写进编辑器快捷键库
+
+`.py` 双击进 PyCharm、`.js` 进 VS Code —— 这个信息就在注册表里：
+
+```
+HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.py\UserChoice  →  ProgId=PyCharm2024.2
+HKEY_CLASSES_ROOT\PyCharm2024.2\shell\open\command                              →  "D:\…\pycharm64.exe" "%1"
+exe 的 VERSIONINFO\…\FileDescription                                            →  PyCharm Professional Edition
+```
+
+Python 实现只用 `winreg` + `ctypes`（读版本信息取友好名称）。识别结果自动补进
+「设置 → 编辑器」的**识别关键词**：屏幕智能体拿到的 `app_scope` 正是前台进程名（`pycharm64`、
+`idea64`、`code`），命中后就把对应编辑器的快捷键注入提示词，演示时不用猜某个功能按什么键。
+
+两类文件被刻意排除：浏览器（`.html` → Edge）和文档编辑器（`.md` → Typora），
+它们不会进编辑器库——写进去只会污染提示词。写入是幂等的：已经在库里的条目只补关键词，
+不覆盖手改过的快捷键，所以「重新识别」随时可以点。
+
+截图：`42-env-overview.png`（面板全貌，安装路径已折叠）、`43-env-paths-open.png`（展开后编辑路径）、
+`44-env-cards.png`（工具卡片）、`45-env-manual.png`（手动安装弹窗：官网入口 + 一键复制/运行）、
+`46-env-confirm.png`（二次确认弹窗 + PATH 勾选）、`47-env-progress.png`（阶段性进度条 + 一行进度）、
+`48-env-install-done.png`（装完 100%）、`49-editors-synced.png`（写进编辑器库）。
+
+## 六、接口一览
+
+| 分组 | 接口 | 说明 |
+| --- | --- | --- |
+| 系统 | `GET /api/health` | 数据库 / 向量库 / 计数 / 工具列表 |
+| 模型 | `GET /api/providers`、`PUT /api/providers/{id}`、`POST /api/providers/{id}/activate`、`POST /api/providers/{id}/test`、`DELETE /api/providers/{id}/key`、`GET /api/providers/ollama/models` | 目录、保存（加密）、切换、连通性测试 |
+| 会话 | `GET/POST /api/conversations`、`GET/PATCH/DELETE /api/conversations/{id}`、`DELETE /api/conversations/{id}/messages`、`GET /api/conversations/{id}/runs` | 严格隔离 + 删除 + Agent 轨迹 |
+| 对话 | `POST /api/chat`（**SSE**） | 事件：`start / node / plan / tool_start / tool_end / token / thought / notice / memory_* / demo / done / error` |
+| 文件 | `POST /api/files/upload` | 多模态图片上传（≤8MB） |
+| 背景 | `GET/POST /api/backgrounds`、`DELETE /api/backgrounds/{name}` | 自定义图片 / 视频背景（≤60MB） |
+| 知识库 | `GET/POST /api/knowledge`、`DELETE /api/knowledge/{id}`、`POST /api/knowledge/search`、`GET /api/knowledge/stats`、`POST /api/knowledge/{reindex,seed}` | 入库、检索调试、重建索引 |
+| 记忆 | `GET/POST /api/memory`、`DELETE /api/memory/{id}`、`POST /api/memory/recall` | 长期记忆管理 |
+| 屏幕 | `POST/GET /api/screen/sessions`、`POST .../{id}/{start,pause,resume,stop}`、`PATCH .../{id}/interval`、`GET .../{id}/events`（**SSE**）、`GET/DELETE /api/screen/lessons` | 演示全生命周期 + 经验库 |
+| 设置 | `GET/PUT /api/settings` | 运行参数 |
+| 环境管家 | `GET /api/env/probe`、`POST /api/env/install`、`GET /api/env/install/{id}?since=N`、`POST /api/env/install/{id}/cancel`、`GET /api/env/installs` | 检测 / 一键安装（后台任务 + 增量日志） / 取消 |
+| 默认打开方式 | `GET /api/env/default-apps`、`POST /api/env/default-apps/apply` | 读注册表文件关联；把识别到的编辑器写进快捷键库 |
+
+环境相关接口的响应**一律带 `ok`**（成功、业务失败、参数校验失败都带），前端只看这一个开关。
+
+完整交互文档：启动后访问 <http://127.0.0.1:8000/docs>。
+
+---
+
+## 七、测试
+
+```powershell
+# 单元测试（纯函数，无需启动服务）
+cd backend
+.\.venv\Scripts\python.exe -m pytest tests/test_units.py -q
+# 56 passed
+.\.venv\Scripts\python.exe -m pytest tests/ -q
+# 77 passed（含环境管家：日志切分、命令拼装、PATH 去重、镜像兜底、注册表解析）
+
+# 端到端冒烟（需后端已启动）
+.\.venv\Scripts\python.exe ..\scripts\smoke_test.py
+# 通过 48 项，失败 0 项
+```
+
+冒烟测试覆盖：健康检查、Key 加密脱敏、知识库重建与检索、Agent 全流程 SSE、
+多轮同会话、新会话隔离、长期记忆写入与召回、危险代码被拒、多模态上传、
+屏幕演示创建→启动→暂停→续跑→结束、会话删除，以及环境管家（检测 / 安装入参校验 /
+默认打开方式识别与写入）。
+
+自动截图（需要本机 Chrome）：
+
+```powershell
+cd frontend
+node scripts/screenshot.mjs      # 主流程 13 张
+node scripts/screenshot-light.mjs # 浅色主题
+node scripts/shoot-env.mjs       # 环境管家 8 张（会真装一次 PHP，装完请在面板里卸载或手动 winget uninstall）
+node scripts/check-env-ui.mjs    # 只做 UI 冒烟：确认环境面板渲染正常、无控制台报错
+```
+
+---
+
+## 八、常见问题
+
+**Q：没有 MySQL 能跑吗？**
+能。`db_fallback_sqlite=true`（默认）时，MySQL 连不上会自动用 `data/code_mentor.db`，
+表结构完全一致。想要严格 MySQL，用 `docker compose up -d mysql` 并改 `DATABASE_URL`。
+
+**Q：为什么用 Qdrant 的 embedded 模式？**
+它和 Qdrant 服务端是同一套引擎，只是把存储放在本地文件，省掉一个必须常驻的服务，
+方便教学环境一键跑起来。要切服务端只需 `QDRANT_MODE=remote` + `QDRANT_URL`。
+
+**Q：没有 API Key 怎么看效果？**
+本地模型不需要 Key：装个 [Ollama](https://ollama.com/)，`ollama pull qwen3:8b`，然后在「模型接入 → Ollama 本地」
+点一下就能用；也可以用任意 OpenAI 兼容端点（LM Studio / one-api / 学校网关）。
+云端供应商里智谱的 `glm-4-flash` 有免费额度，是最省事的体验方式。
+
+**Q：屏幕演示会真的动鼠标吗？**
+会。所以默认提供「演练模式」（只识别不操作）和 `SCREEN_DRY_RUN=true` 开关；
+运行中把鼠标移到屏幕左上角可触发 pyautogui 的 FAILSAFE 紧急中止。
+
+**Q：模型列表里没有我要的模型（比如 DeepSeek 的 V4 系列）？**
+点「模型接入」里的 **刷新模型列表**，它会实时请求该供应商的 `/models`，把你账户里真实可用的模型拉下来
+（DeepSeek 账户目前返回 `deepseek-v4-pro`、`deepseek-flash` 等）。
+列表里还是没有的话，直接在「对话模型」输入框里**手动填模型名**就能用 —— 这个字段本来就是自由输入。
+
+**Q：测试连接成功了，但发消息说「还没有配置 API Key」？**
+「测试连接」用的是输入框里的临时值，不落库。现在主按钮 **「保存并启用」** 会一步完成保存 + 切换，
+测试连接成功时也会顺手保存你刚填的 Key；填了 Key 没保存时表单右上角会显示 `未保存` 标签。
+若仍报错，多半是本地 `data/.fernet.key` 被替换过（旧密文解不开），重新填一次 Key 保存即可。
+
+**Q：太黑了 / 想要白天主题？**
+默认**跟随系统**（Windows 是浅色就自动用浅色主题）；右上角有 🌙/☀️ 一键切换，
+也可以进「设置 → 运行参数 → 外观主题」固定为 浅色 / 深色 / 跟随系统。
+选择存在浏览器本地（`localStorage.cm-theme`），下次打开自动生效。
+
+**Q：中文输入是怎么打到屏幕上的？**
+pyautogui 无法直接输入中文，这里用 Win32 API 写剪贴板 + `Ctrl+V` 粘贴。
+
+---
+
+## 九、交付物
+
+- `backend/` 完整后端源码（含测试）
+- `frontend/` 完整前端源码
+- `docs/架构设计.md` 架构与数据模型说明
+- `docs/验收对照表.md` 需求 → 实现 → 代码位置逐条对照
+- `docs/视频讲解脚本.md` 录屏讲解脚本（含时间轴与讲解词）
+- `docs/screenshots/` 48 张界面截图（深色 42 张 + 浅色 6 张）：主流程、供应商配置、外观与背景、屏幕演示、编辑器、环境管家 8 张（面板 / 折叠路径 / 卡片 / 手动安装弹窗 / 二次确认弹窗 / 阶段进度 / 装完 / 编辑器库）、初始包实拍 1 张
+- `scripts/` 一键启动、冒烟测试、自动截图、打「初始版」发布包（`build_release.py`）
+- `release/CodeMentor-1.0.0-initial.zip` 初始版发布包：默认 logo/名称、预置知识库与最优参数、无对话与记忆（可随时重新生成）
+
+---
+
+<p align="center"><sub>Made for 人工智能课程作业 · 编程学习助手</sub></p>

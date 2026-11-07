@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/.vite/
+# frontend/dist 故意提交：clone 下来不用装 Node 也能直接跑（改源码后 pnpm build 重新生成）
+
+# 运行时数据
+data/*
+!data/.gitkeep
+
+# 环境与密钥
+.env
+
+# 编辑器
+.idea/
+.vscode/
+*.log
+
+# 发布包产物
+/release/

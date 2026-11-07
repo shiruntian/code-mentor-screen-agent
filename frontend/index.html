@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🐳%3C/text%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CodeMentor · 编程学习助手</title>
+    <script>
+      // 在首帧之前定好主题，避免深色闪一下白/浅色闪一下黑
+      ;(function () {
+        try {
+          var pref = localStorage.getItem('cm-theme') || 'auto'
+          var light =
+            pref === 'light' ||
+            (pref === 'auto' && window.matchMedia('(prefers-color-scheme: light)').matches)
+          document.documentElement.dataset.theme = light ? 'light' : 'dark'
+          document.documentElement.style.colorScheme = light ? 'light' : 'dark'
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
