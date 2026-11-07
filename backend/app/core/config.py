@@ -1,4 +1,4 @@
-﻿"""全局配置：所有可调参数集中于此，支持 .env 覆盖。"""
+"""全局配置：所有可调参数集中于此，支持 .env 覆盖。"""
 
 from __future__ import annotations
 
@@ -133,6 +133,8 @@ class Settings(BaseSettings):
     # 全局强制停止快捷键（任何窗口都生效）
     screen_panic_hotkey: str = "ctrl+alt+shift+f12"
     screen_panic_enabled: bool = True
+    # 屏幕演示向学习者提问时，弹一个置顶的原生小窗（浏览器做不到置顶）
+    screen_ask_dialog: bool = True
 
     # ---------- 记忆 ----------
     short_term_window: int = 12  # 送给模型的最大消息条数

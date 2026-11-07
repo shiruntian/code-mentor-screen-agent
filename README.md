@@ -912,6 +912,53 @@ node scripts/check-image-input.mjs # 验证「粘贴 / 拖拽上传 + 点击放�
 node scripts/shoot-shots.mjs      # 会话截图占用 + 清理确认框 3 张
 ```
 
+### 5.16 演示中途提问：置顶小窗 + 答完真的会继续
+
+屏幕演示的视觉模型遇到"选哪个"这类信息缺口时会停下来问。原来只有网页面板里的一行输入框，
+演示进行时整屏都被别的程序占着（有时连控制面板自己都挡着），经常看不到；更糟的是**答完不动**。
+
+#### ① 答完不动：回答被静默丢掉了
+
+模型的 `ask` 动作会让演示循环 `return`（等回答），此时 `runner.task` 已结束。
+学习者提交回答时 `resume()` 发现任务结束就走 `start()` → **新建一个 Runner**，
+而答案原来只 append 在**旧 Runner** 的 `answers` 里 → 新 Runner 一条都不带 →
+模型看到同一屏又原样问一遍，看起来就是"答了也没反应"。
+
+修法：把回答与"已问过的问题"提到控制器层（`_answers` / `_asked`），
+`start()` 建新 Runner 时接上；`stop()` 时清理。加回归测试
+`tests/test_screen_ask.py::test_answer_is_kept_when_runner_restarts`。
+
+顺带加了两条防线：
+
+- **同一问题不重复打断**：已经问过且答过的问题再来一次 → 不弹窗，置 `force_act`，
+  提示词里加「必须动手、禁止提问」，让模型直接执行；
+- 提示词里加「别把自己的控制面板当成目标」：截图里出现「屏幕演示控制台」这类窗口时忽略它。
+
+#### ② 置顶小窗：浏览器做不到，用 tkinter 开原生窗口
+
+`app/screen_agent/ask_dialog.py` 是一个独立小进程（后端 `_spawn_ask_dialog()` 拉起）：
+
+- `-topmost` 钉在最上层，属性里带问题、选项按钮（A/B）、输入框、提交
+- 提交后 POST `/api/screen/sessions/{id}/answer`，后台收到就会跑起来
+- 每 2 秒轮询会话状态：网页那边答掉了、或演示已结束 → 自己关掉
+- 关窗（✕ / Esc）＝ 不作答，演示保持暂停
+
+踩过的两个坑都写进代码注释了：
+
+1. **窗口看不见**：后端用隐藏控制台的父进程拉起子进程，Windows 会让它继承
+   `STARTUPINFO` 的 `SW_HIDE`，窗口建出来却是**最小化**状态（坐标 −32000）。
+   所以创建后必须用 Win32 `ShowWindow(SW_SHOWNORMAL)` + `SetWindowPos(HWND_TOPMOST)` 强制显示；
+2. **高 DPI 模糊**：不声明 DPI 感知时 Windows 把窗口位图放大 1.5 倍，字糊且坐标失真；
+   启动时 `SetProcessDpiAwareness(2)` + `tk scaling` 按实际 DPI 缩放。
+
+窗口高度按问题长短自适应（`update_idletasks` 后取 `winfo_reqheight`），
+不然问题一长就把输入行挤出可视区。
+
+> 开关：`.env` 里 `SCREEN_ASK_DIALOG=true/false`（默认开）。
+> 截图：`docs/screenshots/58-ask-dialog-topmost.png`
+
+---
+
 ### 5.15 截图会越攒越多，所以给每条对话显示占用并支持清理
 
 屏幕演示每走一步就落盘 1~3 张 PNG（操作前 / 操作后 / 局部放大），一次 20 步的演示就是几十 MB。
@@ -991,7 +1038,7 @@ pyautogui 无法直接输入中文，这里用 Win32 API 写剪贴板 + `Ctrl+V`
 - `docs/架构设计.md` 架构与数据模型说明
 - `docs/验收对照表.md` 需求 → 实现 → 代码位置逐条对照
 - `docs/视频讲解脚本.md` 录屏讲解脚本（含时间轴与讲解词）
-- `docs/screenshots/` 55 张界面截图（深色 49 张 + 浅色 6 张）：主流程、供应商配置、外观与背景、屏幕演示、编辑器、环境管家 8 张（面板 / 折叠路径 / 卡片 / 手动安装弹窗 / 二次确认弹窗 / 阶段进度 / 装完 / 编辑器库）、初始包实拍 1 张
+- `docs/screenshots/` 56 张界面截图（深色 50 张 + 浅色 6 张）：主流程、供应商配置、外观与背景、屏幕演示、编辑器、环境管家 8 张（面板 / 折叠路径 / 卡片 / 手动安装弹窗 / 二次确认弹窗 / 阶段进度 / 装完 / 编辑器库）、初始包实拍 1 张
 - `scripts/` 一键启动、冒烟测试、自动截图、打「初始版」发布包（`build_release.py`）
 - `release/CodeMentor-1.0.0-initial.zip` 初始版发布包：默认 logo/名称、预置知识库与最优参数、无对话与记忆（可随时重新生成）
 

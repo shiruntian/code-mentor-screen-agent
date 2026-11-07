@@ -396,6 +396,8 @@ class Runner:
     controls_text: str = ""                          # 最近一次控件树（注入提示词）
     controls_window: str = ""                        # 控件树所属窗口
     answers: list[dict[str, str]] = field(default_factory=list)   # 学习者对提问的回答
+    asked: list[str] = field(default_factory=list)                # already 问过的问题（防重复提问）
+    force_act: bool = False                                       # 禁止再问，必须执行动作
     frame_context: list[str] = field(default_factory=list)   # 本帧内的取证结果（换帧才清空）
     probe_count: int = 0                              # 本帧已取证次数
     deciding: bool = False                            # 是否正在思考（防止重入）
@@ -411,6 +413,11 @@ class ScreenController:
     def __init__(self) -> None:
         self.capture = ScreenCapture(monitor=settings.screen_monitor)
         self._runners: dict[str, Runner] = {}
+        # 学习者的回答 / 已提过的问题要跨「runner 重启」保留：
+        # 模型 ask 之后循环是 return 结束的，回答时 resume 会新建一个 Runner，
+        # 只存在 Runner.answers 里的话，回答会被静默丢掉 —— 表现就是「答了它又问一遍」。
+        self._answers: dict[str, list[dict[str, str]]] = {}
+        self._asked: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------ 持久化
     async def create_session(
@@ -524,6 +531,9 @@ class ScreenController:
 
         IME_GUARD.enabled = bool(settings.screen_ime_guard)
         runner = Runner(session_id=session_id)
+        # 接着上次的回答继续：模型提问会结束循环，回答后是新 Runner，不接上就白答了
+        runner.answers = list(self._answers.get(session_id, []))
+        runner.asked = list(self._asked.get(session_id, []))
         runner.running.set()
         self._runners[session_id] = runner
         runner.task = asyncio.create_task(self._loop(session_id), name=f"screen-{session_id}")
@@ -589,6 +599,8 @@ class ScreenController:
 
     async def stop(self, session_id: str) -> dict[str, Any]:
         IME_GUARD.restore_all()
+        self._answers.pop(session_id, None)
+        self._asked.pop(session_id, None)
         runner = self._runners.get(session_id)
         if runner is not None:
             runner.stopped = True
@@ -827,8 +839,15 @@ class ScreenController:
                     action = swapped
 
                 if action["type"] == "ask":
-                    await self._ask_user(session_id, state, runner, action, thought, shot_url)
-                    return
+                    paused = await self._ask_user(session_id, state, runner, action, thought, shot_url)
+                    if paused:
+                        return
+                    # 重复提问被忽略：带着「不许再问」的指令继续下一步
+                    await bus.publish(
+                        channel,
+                        {"type": "notice", "level": "warning", "message": "按之前的回答继续，不再重复提问"},
+                    )
+                    continue
 
                 if action["type"] == "plan":
                     runner.checklist = [
@@ -1204,9 +1223,35 @@ class ScreenController:
         action: dict[str, Any],
         thought: str,
         shot_url: str,
-    ) -> None:
-        """模型需要额外信息时暂停，等学习者填写后再继续。"""
-        payload = {"question": action["question"], "options": action.get("options") or []}
+    ) -> bool:
+        """模型需要额外信息时暂停，等学习者填写后再继续。
+
+        返回 True = 真的停下来等回答了（调用方应 return）；
+        返回 False = 这次提问被忽略（同一个问题已经问过且答过），调用方应 continue。
+        """
+        question = str(action["question"] or "").strip()
+        normalized = question.replace(" ", "")[:120]
+
+        # 同一个问题已经问过、而且答过了 → 不再反复打断学习者，
+        # 直接把「不许再问」的指令塞进上下文让它动手。
+        already = bool(normalized) and normalized in runner.asked
+        if already and runner.answers:
+            runner.force_act = True
+            await bus.publish(
+                f"screen:{session_id}",
+                {
+                    "type": "notice",
+                    "level": "warning",
+                    "message": "模型又想问同一个问题，已按之前的回答让它直接继续",
+                },
+            )
+            logger.info("忽略重复提问：%s", question[:40])
+            return False
+        if normalized:
+            runner.asked.append(normalized)
+            self._asked.setdefault(session_id, []).append(normalized)
+
+        payload = {"question": question, "options": action.get("options") or []}
         runner.running.clear()
         await self._save_step(
             session_id, state, runner, thought or action["question"], action, shot_url, "waiting"
@@ -1227,7 +1272,43 @@ class ScreenController:
                 "message": "模型需要你补充信息，填写后会继续演示",
             },
         )
+        # 弹一个置顶小窗：演示时整屏都被别的程序占着，网页里的输入框经常看不到
+        self._spawn_ask_dialog(session_id, question, payload["options"])
         logger.info("演示暂停等待输入：%s", payload["question"][:40])
+        return True
+
+    def _spawn_ask_dialog(self, session_id: str, question: str, options: list[str]) -> None:
+        """起一个 tkinter 置顶窗口等回答；失败就只靠网页里的输入框。"""
+        if not bool(getattr(settings, "screen_ask_dialog", True)):
+            return
+        try:
+            import subprocess
+            import sys
+
+            argv = [
+                sys.executable,
+                "-m",
+                "app.screen_agent.ask_dialog",
+                "--base",
+                f"http://127.0.0.1:{settings.port}",
+                "--session",
+                session_id,
+                "--question",
+                question,
+            ]
+            for opt in options[:4]:
+                argv.extend(["--options", str(opt)])
+            creation = 0x08000000  # CREATE_NO_WINDOW：不要多弹一个黑框
+            subprocess.Popen(
+                argv,
+                cwd=str(Path(__file__).resolve().parents[2]),
+                creationflags=creation,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("置顶提问窗启动失败（不影响演示）: %s", exc)
 
     async def answer(self, session_id: str, answer: str) -> dict[str, Any]:
         """接收学习者对 ask 的回答，写进上下文并继续。"""
@@ -1242,10 +1323,14 @@ class ScreenController:
             row.pending_question = None
             await session.commit()
 
+        entry = {"question": question, "answer": text}
+        # 双重落点：内存里的 _answers 供「重启 runner」时接上，runner.answers 供当前轮直接用
+        self._answers.setdefault(session_id, []).append(entry)
         runner = self._runners.get(session_id)
         if runner is not None:
-            runner.answers.append({"question": question, "answer": text})
+            runner.answers.append(entry)
             runner.controls_text = ""
+            runner.force_act = False
         await self._set_status(session_id, "paused")
         await bus.publish(
             f"screen:{session_id}",
@@ -1668,6 +1753,17 @@ class ScreenController:
                 + "\n"
                 if runner.answers
                 else ""
+            )
+            + (
+                "【必须动手 · 禁止提问】上面这些指示已经足够，这一次必须输出一个具体动作"
+                "（click / type / key / sequence / wait 等），不允许再输出 ask。\n"
+                if runner.force_act and runner.answers
+                else ""
+            )
+            + (
+                "【别把自己的控制面板当成目标】截图里如果出现标题含「屏幕演示」「屏幕演示控制台」"
+                "或「演示暂停，需要你回答」的窗口/面板，那都是本项目自己的界面："
+                "不要点击它们、不要把它们的文字当成学习者应用里的内容。\n"
             )
             + f"【当前前台程序】{runner.app_scope}\n"
             + (
