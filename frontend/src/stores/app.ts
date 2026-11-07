@@ -8,6 +8,7 @@ import type {
   Message,
   ProviderConfig,
   ProviderInfo,
+  ScreenshotUsage,
 } from '../types'
 
 function emptyLive(): LiveRun {
@@ -62,6 +63,10 @@ export const useAppStore = defineStore('app', {
     activeId: null as string | null,
     messages: [] as Message[],
     loadingMessages: false,
+    /** 全库截图占用（含没挂到会话上的演示记录） */
+    screenshotTotal: null as ScreenshotUsage | null,
+    screenshotOrphans: null as ScreenshotUsage | null,
+    cleaningShots: false,
 
     // 交互
     mode: 'agent' as 'agent' | 'chat',
@@ -110,7 +115,9 @@ export const useAppStore = defineStore('app', {
       return state.providers.find((p) => p.provider === state.activeProvider) || null
     },
     currentModel(state): string {
-      return state.activeConfig?.model || ''
+      // Pinia 的 getter 里拿不到另一个 getter（state 里只有 state），这里自己查一次
+      const cfg = state.providers.find((p) => p.provider === state.activeProvider)
+      return cfg?.model || ''
     },
     hasMessages(state): boolean {
       return state.messages.length > 0
@@ -125,7 +132,11 @@ export const useAppStore = defineStore('app', {
         const [health, providers, convs, settings] = await Promise.all([
           api.get<any>('/api/health'),
           api.get<any>('/api/providers'),
-          api.get<{ items: Conversation[] }>('/api/conversations'),
+          api.get<{
+            items: Conversation[]
+            screenshot_total?: ScreenshotUsage
+            screenshot_orphans?: ScreenshotUsage
+          }>('/api/conversations'),
           api.get<any>('/api/settings'),
         ])
         this.health = health
@@ -133,6 +144,8 @@ export const useAppStore = defineStore('app', {
         this.providers = providers.configs
         this.activeProvider = providers.active || providers.configs[0]?.provider || ''
         this.conversations = convs.items
+        this.screenshotTotal = convs.screenshot_total || null
+        this.screenshotOrphans = convs.screenshot_orphans || null
         this.settings = settings
         this.booted = true
         // 后台拉一次模型列表，让顶栏/设置里的候选是最新的
@@ -235,8 +248,56 @@ export const useAppStore = defineStore('app', {
 
     // ------------------------------------------------------------------ 会话
     async loadConversations() {
-      const data = await api.get<{ items: Conversation[] }>('/api/conversations')
+      const data = await api.get<{
+        items: Conversation[]
+        screenshot_total?: ScreenshotUsage
+        screenshot_orphans?: ScreenshotUsage
+      }>('/api/conversations')
       this.conversations = data.items
+      this.screenshotTotal = data.screenshot_total || null
+      this.screenshotOrphans = data.screenshot_orphans || null
+    },
+
+    /** 删掉某个会话的屏幕演示截图（聊天消息和演示文字记录都保留） */
+    async clearConversationScreenshots(id: string) {
+      if (this.cleaningShots) return
+      this.cleaningShots = true
+      try {
+        const data = await api.del<{ freed_bytes: number; freed_human: string; images: number }>(
+          `/api/conversations/${id}/screenshots`,
+        )
+        await this.loadConversations()
+        if (data.freed_bytes > 0) {
+          this.toast('success', `已清理 ${data.freed_human}（${data.images} 张截图）`, '演示的文字记录保留')
+        } else {
+          this.toast('info', '这个会话没有可清理的截图')
+        }
+      } catch (e) {
+        this.report(e)
+      } finally {
+        this.cleaningShots = false
+      }
+    },
+
+    /** 删掉没挂到任何会话上的演示截图（直接点「演示」开出来的那些） */
+    async clearOrphanScreenshots() {
+      if (this.cleaningShots) return
+      this.cleaningShots = true
+      try {
+        const data = await api.del<{ freed_bytes: number; freed_human: string; sessions: number }>(
+          '/api/screenshots/orphans',
+        )
+        await this.loadConversations()
+        if (data.freed_bytes > 0) {
+          this.toast('success', `已清理 ${data.freed_human}`, `${data.sessions} 个未关联任何对话的演示记录`)
+        } else {
+          this.toast('info', '没有未关联的演示截图')
+        }
+      } catch (e) {
+        this.report(e)
+      } finally {
+        this.cleaningShots = false
+      }
     },
 
     newConversation() {
@@ -282,13 +343,22 @@ export const useAppStore = defineStore('app', {
 
     async deleteConversation(id: string) {
       try {
-        await api.del(`/api/conversations/${id}`)
+        const data = await api.del<{ screenshots?: { freed_bytes: number; freed_human: string } }>(
+          `/api/conversations/${id}`,
+        )
         this.conversations = this.conversations.filter((c) => c.id !== id)
         if (this.activeId === id) {
           this.activeId = null
           this.messages = []
         }
-        this.toast('success', '会话已删除')
+        const freed = data?.screenshots?.freed_bytes || 0
+        this.toast(
+          'success',
+          '会话已删除',
+          freed > 0 ? `同时清掉了 ${data.screenshots!.freed_human} 演示截图` : undefined,
+        )
+        // 截图统计变了，顺手刷新一下侧边栏的占用
+        void this.loadConversations().catch(() => undefined)
       } catch (e) {
         this.report(e)
       }

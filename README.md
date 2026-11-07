@@ -21,7 +21,7 @@
 | 多用户 | 只有本地单用户（`users` 表预留 `user_id`，但没有登录/权限体系） |
 | 向量检索 | 默认用离线哈希向量，语义能力有限；换成在线 embedding 需手动「重建索引」 |
 | 工程化 | 无 CI/CD、无 Docker 镜像、覆盖率未统计；`docs/` 里部分数字会随迭代漂移 |
-| 测试 | 后端 80 项单测 + 48 项端到端冒烟通过，但都是单机单账号场景 |
+| 测试 | 后端 95 项单测 + 48 项端到端冒烟通过，但都是单机单账号场景 |
 
 <p align="center">
   <img src="docs/screenshots/01-welcome.png" width="88%" alt="欢迎页" />
@@ -37,6 +37,7 @@
 | 🔧 **16 个工具** | 知识库检索、Python 代码沙箱、记忆写入/召回、屏幕演示提案、看一眼屏幕、本机文件（列目录 / 搜文件 / 读文本 / 打开 / 在资源管理器定位 / 列磁盘）、联网搜索、网页取正文、任务拆解与勾销 |
 | 🛡 **工具异常自愈** | 工具内部任何异常都会转成 `{ok:false,error,hint}` 结构返回给模型，模型据此解释并给替代方案，界面不会崩 |
 | 💬 **多会话隔离** | 每个会话独立的消息表、独立上下文、独立标题，可重命名 / 清空 / 删除 |
+| 💾 **截图占用可见可清** | 侧边栏每条对话显示它的演示截图占了多少 MB，悬停图标即可只清这个对话的截图（文字记录保留）；删对话时截图自动跟着删；顶部还显示总占用并支持一键清掉「没挂到任何对话上」的历史演示 |
 | 🧾 **双层记忆** | 短期：最近 N 条消息 + 滚动摘要；长期：跨会话事实/偏好写入 MySQL，并用 Qdrant 语义召回 |
 | 📚 **RAG** | 文档切片 → 向量化 → Qdrant 入库 → 混合检索（向量 0.62 + 关键词 0.38），内置 10 篇编程知识包 |
 | 🖼 **多模态** | 上传图片提问；屏幕演示自动把截图喂给视觉模型 |
@@ -197,7 +198,8 @@ homework2/
 │   │   ├── api/routes/             # 10 组 REST 接口
 │   │   └── schemas/                # Pydantic 入参出参
 │   ├── tests/test_units.py         # 56 个单元测试
-│   ├── tests/test_env_manager.py   # 21 个环境管家单元测试
+│   ├── tests/test_env_manager.py   # 24 个环境管家单元测试
+│   ├── tests/test_screenshot_usage.py  # 15 个截图统计/清理单元测试
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -908,6 +910,37 @@ node scripts/shoot-env.mjs       # 环境管家 8 张（会真装一次 PHP，�
 node scripts/check-env-ui.mjs    # 只做 UI 冒烟：确认环境面板渲染正常、无控制台报错
 ```
 
+### 5.15 截图会越攒越多，所以给每条对话显示占用并支持清理
+
+屏幕演示每走一步就落盘 1~3 张 PNG（操作前 / 操作后 / 局部放大），一次 20 步的演示就是几十 MB。
+项目自己的测试数据攒到过 **88 个演示会话 / 5268 张图 / 1.7 GB**，所以把「占多少、怎么删」做进了界面：
+
+#### 占用的统计口径
+
+| 落盘位置 | 归属判断 |
+| --- | --- |
+| `data/screenshots/<session_id>/` | 演示会话通过 `screen_sessions.conversation_id` 挂到聊天会话，目录大小算给那个会话 |
+| `data/screenshots/shared/` | 「看一眼屏幕」工具抓的图没有会话目录，只能从消息内容里的 `/static/screenshots/shared/xxx.png` 反查；同一张图被多条消息引用只算一次 |
+
+`GET /api/conversations` 一次返回每个会话的 `screenshot{bytes,images,sessions,human}` 和全库合计
+（`screenshot_total` / `screenshot_orphans`）。目录大小按 mtime 做了缓存，首次约 400ms、之后 20ms 以内。
+
+#### 三种删除方式
+
+| 入口 | 接口 | 行为 |
+| --- | --- | --- |
+| 对话条目悬停 → 📷⊘ 图标 | `DELETE /api/conversations/{id}/screenshots` | **只删图**，聊天消息与演示步骤的文字记录保留，`screen_steps.screenshot` 置空（前端 `v-if` 挡住，不会裂图） |
+| 删除对话 | `DELETE /api/conversations/{id}` | 截图 + 演示会话/步骤记录一起删（会话都没了，记录留着也没用） |
+| 顶部 🧹 图标 | `DELETE /api/screenshots/orphans` | 清掉 `conversation_id` 为空、或指向已不存在会话的「孤儿演示」，以及没有任何消息引用的 shared 图 |
+
+三种都会返回 `freed_bytes / freed_human`，前端弹 toast 告诉你省了多少。
+确认框是自绘的（不是 `window.confirm`），并且**必须 `Teleport` 到 body**——
+侧边栏有 `backdrop-filter`，会成为 `position: fixed` 的包含块，留在里面遮罩只盖住侧边栏、弹窗还会歪到左边。
+
+> 命令行版本：`scripts/clean_screenshots.py --days 0 --keep-latest 5 --dry-run`（默认不删，加 `--yes` 才执行）。
+
+—— 见 `docs/screenshots/51-conv-screenshot-size.png`、`52-conv-shot-hover.png`、`53-shot-cleanup-confirm.png`。
+
 ---
 
 ## 八、常见问题
@@ -956,7 +989,7 @@ pyautogui 无法直接输入中文，这里用 Win32 API 写剪贴板 + `Ctrl+V`
 - `docs/架构设计.md` 架构与数据模型说明
 - `docs/验收对照表.md` 需求 → 实现 → 代码位置逐条对照
 - `docs/视频讲解脚本.md` 录屏讲解脚本（含时间轴与讲解词）
-- `docs/screenshots/` 48 张界面截图（深色 42 张 + 浅色 6 张）：主流程、供应商配置、外观与背景、屏幕演示、编辑器、环境管家 8 张（面板 / 折叠路径 / 卡片 / 手动安装弹窗 / 二次确认弹窗 / 阶段进度 / 装完 / 编辑器库）、初始包实拍 1 张
+- `docs/screenshots/` 51 张界面截图（深色 45 张 + 浅色 6 张）：主流程、供应商配置、外观与背景、屏幕演示、编辑器、环境管家 8 张（面板 / 折叠路径 / 卡片 / 手动安装弹窗 / 二次确认弹窗 / 阶段进度 / 装完 / 编辑器库）、初始包实拍 1 张
 - `scripts/` 一键启动、冒烟测试、自动截图、打「初始版」发布包（`build_release.py`）
 - `release/CodeMentor-1.0.0-initial.zip` 初始版发布包：默认 logo/名称、预置知识库与最优参数、无对话与记忆（可随时重新生成）
 

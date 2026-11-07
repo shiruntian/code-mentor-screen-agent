@@ -13,6 +13,7 @@ from app.core.errors import NotFoundError
 from app.db.base import get_db
 from app.db.models import AgentRun, Conversation, Message
 from app.schemas.api import ConversationCreate, ConversationUpdate
+from app.services import screenshot_usage
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -64,7 +65,30 @@ async def list_conversations(
             .limit(200)
         )
     ).scalars().all()
-    return {"items": [serialize_conversation(c) for c in rows], "total": len(rows)}
+
+    # 每个会话的屏幕演示截图占用 + 全库合计（一次扫描算完，避免前端 N+1 请求）
+    per, orphans = await screenshot_usage.usage_overview(session, [c.id for c in rows])
+    items = []
+    total = screenshot_usage.ShotUsage(
+        bytes=orphans.bytes, images=orphans.images,
+        sessions=orphans.sessions, shared=orphans.shared,
+    )
+    for c in rows:
+        data = serialize_conversation(c)
+        usage = per.get(c.id, screenshot_usage.ShotUsage())
+        data["screenshot"] = usage.as_dict()
+        total.bytes += usage.bytes
+        total.images += usage.images
+        total.sessions += usage.sessions
+        total.shared += usage.shared
+        items.append(data)
+
+    return {
+        "items": items,
+        "total": len(rows),
+        "screenshot_total": total.as_dict(),
+        "screenshot_orphans": orphans.as_dict(),
+    }
 
 
 @router.post("")
@@ -129,11 +153,45 @@ async def delete_conversation(
     conv = await session.get(Conversation, conversation_id)
     if conv is None or conv.user_id != user_id:
         raise NotFoundError("会话不存在")
+
+    # 会话删了，它的屏幕演示截图也一并删掉（连演示会话/步骤记录一起，反正没会话挂在上面了）
+    purged = await screenshot_usage.purge(session, [conversation_id], drop_records=True)
+
     await session.execute(delete(Message).where(Message.conversation_id == conversation_id))
     await session.execute(delete(AgentRun).where(AgentRun.conversation_id == conversation_id))
     await session.delete(conv)
     await session.commit()
-    return {"ok": True, "deleted": conversation_id}
+    return {
+        "ok": True,
+        "deleted": conversation_id,
+        "screenshots": purged.as_dict(),
+    }
+
+
+@router.delete("/{conversation_id}/screenshots")
+async def delete_conversation_screenshots(
+    conversation_id: str,
+    session: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """只删这个会话的截图，聊天消息和演示步骤的文字记录都保留。"""
+    conv = await session.get(Conversation, conversation_id)
+    if conv is None or conv.user_id != user_id:
+        raise NotFoundError("会话不存在")
+
+    before = (await screenshot_usage.usage_map(session, [conversation_id]))[conversation_id]
+    purged = await screenshot_usage.purge(session, [conversation_id], drop_records=False)
+    await session.commit()
+
+    after = (await screenshot_usage.usage_map(session, [conversation_id]))[conversation_id]
+    data = purged.as_dict()
+    data.update(
+        {
+            "before": before.as_dict(),
+            "after": after.as_dict(),
+        }
+    )
+    return data
 
 
 @router.delete("/{conversation_id}/messages")

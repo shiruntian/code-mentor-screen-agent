@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { useBrandingStore } from '../stores/branding'
 
 const branding = useBrandingStore()
@@ -12,6 +12,39 @@ const ui = useUiStore()
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
 const inputRef = ref<HTMLInputElement | null>(null)
+
+/** 自定义确认框（比 window.confirm 好看，也能截进文档） */
+interface ConfirmState {
+  icon: string
+  title: string
+  lines: string[]
+  danger?: boolean
+  okText: string
+  run: () => Promise<void> | void
+}
+const confirmState = ref<ConfirmState | null>(null)
+const confirmBusy = ref(false)
+
+function ask(state: ConfirmState) {
+  confirmState.value = state
+}
+
+function closeConfirm() {
+  if (confirmBusy.value) return
+  confirmState.value = null
+}
+
+async function runConfirm() {
+  const state = confirmState.value
+  if (!state || confirmBusy.value) return
+  confirmBusy.value = true
+  try {
+    await state.run()
+    confirmState.value = null
+  } finally {
+    confirmBusy.value = false
+  }
+}
 
 const activeModelLabel = computed(() => {
   const cfg = app.activeConfig
@@ -41,9 +74,57 @@ function cancelRename() {
 }
 
 async function remove(id: string, title: string) {
-  if (window.confirm(`确定删除会话「${title}」吗？该会话的消息将永久删除。`)) {
-    await app.deleteConversation(id)
+  const conv = app.conversations.find((c) => c.id === id)
+  const shots = conv?.screenshot?.bytes || 0
+  const lines = ['该会话的所有消息将永久删除。']
+  if (shots > 0) lines.push(`它的屏幕演示截图（${conv?.screenshot?.human}）也会一并删除。`)
+  ask({
+    icon: '🗑',
+    title: `删除会话「${title}」？`,
+    lines,
+    danger: true,
+    okText: '删除会话',
+    run: () => app.deleteConversation(id),
+  })
+}
+
+/** 只清截图，演示的文字记录和聊天消息都保留 */
+function clearShots(conv: {
+  id: string
+  title: string
+  screenshot?: { bytes: number; human: string; images: number; sessions: number }
+}) {
+  const shots = conv.screenshot
+  if (!shots || shots.bytes <= 0) {
+    app.toast('info', '这个会话没有截图可清理')
+    return
   }
+  ask({
+    icon: '📷',
+    title: `清理「${conv.title}」的屏幕演示截图？`,
+    lines: [
+      `释放 ${shots.human}（${shots.images} 张图，来自 ${shots.sessions} 次演示）。`,
+      '聊天记录和演示的文字步骤都会保留，只是图片不能再查看。',
+    ],
+    okText: `清理 ${shots.human}`,
+    run: () => app.clearConversationScreenshots(conv.id),
+  })
+}
+
+/** 清掉所有没挂在任何对话上的演示截图（直接点「演示」开出来的） */
+function clearOrphans() {
+  const shots = app.screenshotOrphans
+  if (!shots || shots.bytes <= 0) return
+  ask({
+    icon: '🧹',
+    title: '清理未关联任何对话的演示截图？',
+    lines: [
+      `释放 ${shots.human}（${shots.images} 张图，${shots.sessions} 次演示）。`,
+      '这些演示不是从对话里发起的，删掉不影响任何聊天记录。',
+    ],
+    okText: `清理 ${shots.human}`,
+    run: () => app.clearOrphanScreenshots(),
+  })
 }
 </script>
 
@@ -75,7 +156,27 @@ async function remove(id: string, title: string) {
 
     <div class="list-head">
       <span>对话记录</span>
-      <span class="count">{{ app.conversations.length }}</span>
+      <span class="head-right">
+        <span v-if="app.screenshotTotal && app.screenshotTotal.bytes > 0" class="shots-total" :title="`截图总占用 ${app.screenshotTotal.human}（${app.screenshotTotal.images} 张）`">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+          {{ app.screenshotTotal.human }}
+        </span>
+        <button
+          v-if="app.screenshotOrphans && app.screenshotOrphans.bytes > 0"
+          class="mini orphan-clean"
+          :disabled="app.cleaningShots"
+          :title="`有 ${app.screenshotOrphans.human} 截图不属于任何对话（直接点「演示」开出来的），点击清理`"
+          @click.stop="clearOrphans"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+            <path d="M3 5.5h18v13H3z" stroke-linejoin="round" /><circle cx="8.2" cy="10.3" r="1.5" /><path d="M3.6 17.2l4.9-4.6 3.6 3.3" stroke-linecap="round" stroke-linejoin="round" /><path d="M4 3.6l16 16.8" stroke-linecap="round" />
+          </svg>
+        </button>
+        <span class="count">{{ app.conversations.length }}</span>
+      </span>
     </div>
 
     <div class="conv-list scroll-y">
@@ -104,12 +205,30 @@ async function remove(id: string, title: string) {
             <div class="conv-title ellipsis">{{ conv.title }}</div>
             <div class="conv-meta">
               <span>{{ conv.message_count }} 条</span>
+              <template v-if="conv.screenshot && conv.screenshot.bytes > 0">
+                <span class="sep">·</span>
+                <span
+                  class="shot-badge"
+                  :title="`屏幕演示截图 ${conv.screenshot.human}（${conv.screenshot.images} 张 / ${conv.screenshot.sessions} 次演示）`"
+                >📷 {{ conv.screenshot.human }}</span>
+              </template>
               <span class="sep">·</span>
               <span>{{ relativeTime(conv.updated_at) }}</span>
             </div>
           </template>
         </div>
         <div class="conv-actions" @click.stop>
+          <button
+            v-if="conv.screenshot && conv.screenshot.bytes > 0"
+            class="mini shots"
+            :disabled="app.cleaningShots"
+            :title="`清理截图，释放 ${conv.screenshot.human}（聊天记录保留）`"
+            @click="clearShots(conv)"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+              <path d="M3 5.5h18v13H3z" stroke-linejoin="round" /><circle cx="8.2" cy="10.3" r="1.5" /><path d="M3.6 17.2l4.9-4.6 3.6 3.3" stroke-linecap="round" stroke-linejoin="round" /><path d="M4 3.6l16 16.8" stroke-linecap="round" />
+            </svg>
+          </button>
           <button class="mini" title="重命名" @click="startRename(conv.id, conv.title)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
               <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" stroke-linecap="round" stroke-linejoin="round" />
@@ -133,6 +252,34 @@ async function remove(id: string, title: string) {
         </svg>
       </button>
     </div>
+
+    <!-- 确认弹窗（清理截图 / 删除会话）。
+         必须传送到 body：侧边栏有 backdrop-filter，会变成 position:fixed 的包含块，
+         留在里面会让遮罩只盖住侧边栏、弹窗也歪到左边。 -->
+    <Teleport to="body">
+      <div v-if="confirmState" class="confirm-mask" @click.self="closeConfirm">
+        <div class="confirm-dialog" role="dialog" aria-modal="true">
+          <div class="confirm-head">
+            <span class="confirm-icon">{{ confirmState.icon }}</span>
+            <p class="confirm-title">{{ confirmState.title }}</p>
+          </div>
+          <ul class="confirm-lines">
+            <li v-for="(line, i) in confirmState.lines" :key="i">{{ line }}</li>
+          </ul>
+          <div class="confirm-actions">
+            <button class="btn tiny" :disabled="confirmBusy" @click="closeConfirm">取消</button>
+            <button
+              class="btn tiny"
+              :class="confirmState.danger ? 'btn-danger' : 'btn-primary'"
+              :disabled="confirmBusy"
+              @click="runConfirm"
+            >
+              {{ confirmBusy ? '处理中…' : confirmState.okText }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
@@ -288,6 +435,111 @@ async function remove(id: string, title: string) {
 .mini.danger:hover {
   color: var(--danger);
   background: rgba(248, 113, 113, 0.12);
+}
+.mini.shots:hover {
+  color: #f0b429;
+  background: rgba(240, 180, 41, 0.14);
+}
+.mini:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 会话条目里的截图占用小徽标 */
+.shot-badge {
+  color: #f0b429;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* 顶部：总占用 + 清理未关联 */
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shots-total {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  color: #f0b429;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+.orphan-clean {
+  color: #f0b429;
+  opacity: 0.75;
+}
+.orphan-clean:hover {
+  opacity: 1;
+  background: rgba(240, 180, 41, 0.16);
+  color: #f0b429;
+}
+
+/* 确认弹窗 */
+.confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 18, 0.62);
+  backdrop-filter: blur(3px);
+  animation: confirmIn 0.14s ease-out;
+}
+@keyframes confirmIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.confirm-dialog {
+  width: min(440px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 16px;
+  background: var(--dialog-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+}
+.confirm-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.confirm-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  background: rgba(245, 158, 11, 0.16);
+}
+.confirm-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.confirm-lines {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text-2);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .rename-input {
   width: 100%;

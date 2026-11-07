@@ -1,3 +1,11 @@
+export interface ScreenshotUsage {
+  bytes: number
+  images: number
+  sessions: number
+  shared: number
+  human: string
+}
+
 export interface Conversation {
   id: string
   title: string
@@ -8,6 +16,8 @@ export interface Conversation {
   pinned: boolean
   created_at: string
   updated_at: string
+  /** 该会话的屏幕演示截图占用（后端统计，sessions = 演示会话数） */
+  screenshot?: ScreenshotUsage
 }
 
 export interface Attachment {

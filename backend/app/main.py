@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
-from app.api.routes import backgrounds, branding, env as env_routes, chat, conversations, files, health, knowledge, memory, providers, screen, settings as settings_router
+from app.api.routes import backgrounds, branding, env as env_routes, chat, conversations, files, health, knowledge, memory, providers, screen, screenshots, settings as settings_router
 from app.core.config import PROJECT_ROOT, settings
 from app.core.errors import AppError
 from app.core.logging import get_logger, setup_logging
@@ -183,6 +183,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
+app.include_router(screenshots.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
