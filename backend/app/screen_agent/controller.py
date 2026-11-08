@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
+import sys
+import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1389,9 +1393,6 @@ class ScreenController:
         if not bool(getattr(settings, "screen_ask_dialog", True)):
             return
         try:
-            import subprocess
-            import sys
-
             argv = [
                 sys.executable,
                 "-m",
@@ -1406,16 +1407,48 @@ class ScreenController:
             for opt in options[:4]:
                 argv.extend(["--options", str(opt)])
             creation = 0x08000000  # CREATE_NO_WINDOW：不要多弹一个黑框
-            subprocess.Popen(
+            # 子进程的错误以前丢进了 DEVNULL，窗口没弹出来也查不到原因；
+            # 现在落到 data/logs/ask_dialog.log，排查时能直接看
+            log_dir = Path(__file__).resolve().parents[3] / "data" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "ask_dialog.log"
+            handle = open(log_file, "a", encoding="utf-8")  # noqa: SIM115
+            handle.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} 拉起提问窗 ===\n")
+            handle.flush()
+            proc = subprocess.Popen(
                 argv,
                 cwd=str(Path(__file__).resolve().parents[2]),
                 creationflags=creation,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=handle,
             )
+            logger.info("置顶提问窗已拉起 pid=%s（日志 %s）", proc.pid, log_file)
+            threading.Thread(
+                target=self._watch_ask_dialog, args=(proc, handle), daemon=True
+            ).start()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("置顶提问窗启动失败（不影响演示）: %s", exc)
+            logger.warning("置顶提问窗启动失败（不影响演示，网页里仍可回答）: %s", exc)
+
+    @staticmethod
+    def _watch_ask_dialog(proc, handle) -> None:  # noqa: ANN001
+        """后台盯一眼：3 秒后窗口还没出现就把原因写进日志。"""
+        try:
+            time.sleep(3.0)
+            if proc.poll() is not None:
+                handle.write(f"[watch] 子进程已退出，exit={proc.returncode}\n")
+                handle.flush()
+                logger.warning("置顶提问窗启动后立即退出（exit=%s），详见 data/logs/ask_dialog.log", proc.returncode)
+            else:
+                handle.write("[watch] 子进程仍在运行（窗口应已显示）\n")
+                handle.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def answer(self, session_id: str, answer: str) -> dict[str, Any]:
         """接收学习者对 ask 的回答，写进上下文并继续。"""

@@ -912,6 +912,59 @@ node scripts/check-image-input.mjs # 验证「粘贴 / 拖拽上传 + 点击放�
 node scripts/shoot-shots.mjs      # 会话截图占用 + 清理确认框 3 张
 ```
 
+### 5.23 置顶提问窗从来没弹出来过：一个 NameError 被 silence 了一整轮
+
+你说「提问框没置顶，跑到控制台里去了」。查下来不是置顶失败，是**窗口压根没被创建**：
+
+```python
+# controller.py 里
+subprocess.Popen(argv, cwd=str(Path(__file__).resolve().parents[2]), ...)
+                             ↑ Path 没 import
+```
+
+`controller.py` 顶部只有 `asyncio / json / re / threading / time`，**没有 `import Path`**。
+于是每次提问都抛 `NameError: name 'Path' is not defined`，而 except 分支写的是：
+
+```python
+except Exception as exc:
+    logger.debug("置顶提问窗启动失败（不影响演示）: %s", exc)   # debug 级别，默认不输出
+```
+
+**一整个功能就这么静默失效了**——日志里一个字都没有，界面上只看到网页输入框。
+
+#### 为什么会漏掉
+
+当初验收时我是**手动**跑的 `python -m app.screen_agent.ask_dialog ...`，
+窗口正常弹出、置顶正常、截图也存了。但那只验证了**脚本本身**，
+没验证**后端拉起它的那条路径**。
+
+#### 修了什么
+
+1. `from pathlib import Path`、`import subprocess`、`import sys` 提到模块级；
+2. 子进程的 stdout/stderr **落到 `data/logs/ask_dialog.log`**（原来是 DEVNULL，报错全丢）；
+3. 起一个 3 秒看门狗：子进程提前退出就 `logger.warning` + 写日志；
+4. except 从 `debug` 提到 `warning`——起不来必须有人看得见。
+
+#### 验证
+
+用真实链路复现（建一个 waiting 会话 → 调 `_spawn_ask_dialog` → 枚举窗口）：
+
+| 检查项 | 结果 |
+| --- | --- |
+| 窗口存在 | ✅「屏幕演示 · 需要你补充信息」 |
+| 可见 / 未最小化 | ✅ `visible=True iconic=False` |
+| 置顶 | ✅ `exstyle & 0x8` 为真 |
+| 位置 | (1020,256)-(1562,507)，2.5s / 5s / 9s 三次都在 |
+| 子进程日志 | ✅ `[watch] 子进程仍在运行（窗口应已显示）` |
+
+`tests/test_screen_ask_spawn.py` 6 项钉住：Popen 必须真的被调用（曾经的 NameError 会让它
+一次都不调用）、cwd 必须是 backend、输出必须重定向到文件、关掉开关时不起进程、
+起不来要 warning、以及 `controller` 模块里必须有 `Path`。
+
+> 教训：**"不影响演示"不该等于"悄悄略过"**。降级可以，但降级必须留痕。
+
+---
+
 ### 5.22 一个勾选框，整屏判定永远看不见
 
 上一轮"点 D 选项怎么都点不上"的真正原因，量出来是这样：
