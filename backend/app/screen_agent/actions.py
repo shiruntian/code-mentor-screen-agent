@@ -159,6 +159,12 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
         if not query:
             raise ActionError("focus 需要 title（窗口标题片段）或 app（进程名片段）")
         return {"type": "focus", "query": str(query)[:80]}
+    if kind in ("knowledge", "kb", "search_knowledge", "lookup"):
+        # 查本地知识库（答题前先查课件/题库）
+        query = action.get("query") or action.get("text") or action.get("q")
+        if not query:
+            raise ActionError("knowledge 需要 query（要查的内容）")
+        return {"type": "knowledge", "query": str(query)[:200]}
     if kind == "wait":
         try:
             seconds = float(action.get("seconds") or action.get("value") or 1.0)
@@ -665,6 +671,8 @@ def _describe(action: dict[str, Any]) -> str:
         return "组合键 " + "+".join(action.get("keys") or [])
     if kind == "focus":
         return f"切到窗口「{action.get('query')}」"
+    if kind == "knowledge":
+        return f"查知识库：{str(action.get('query'))[:30]}"
     if kind == "key":
         return f"按键 {action['key']}"
     if kind == "type":
@@ -1130,6 +1138,9 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
         return "演示完成"
     if kind == "focus":
         return _focus_window(str(normalized.get("query") or ""))
+    if kind == "knowledge":
+        # 真正的检索在 controller 里异步执行（这里在 worker 线程里，碰 Qdrant 异步客户端不安全）
+        return f"查知识库：{str(normalized.get('query'))[:40]}"
     if kind == "wait":
         time.sleep(normalized["seconds"])
         return _describe(normalized)

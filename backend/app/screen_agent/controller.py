@@ -101,6 +101,8 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 - {"type":"type","text":"要输入的内容"}  中文会自动走剪贴板粘贴
 批量（结果可预期的短流程，最多 4 步）：
 - {"type":"sequence","actions":[{"type":"type","text":"notepad"},{"type":"key","key":"enter"}]}
+- {"type":"focus","title":"章节测验"}  按窗口标题/进程名直接激活某个窗口（切窗口首选，比 alt+tab 可靠）
+- {"type":"knowledge","query":"市场营销 4P"}  查本地知识库（导入过课件/题库才有料），结果会回到下一帧的提示里
 其它：{"type":"wait","seconds":1}  {"type":"done"}
 
 ## 常用快捷键（优先用它们，比猜坐标可靠得多）
@@ -205,6 +207,27 @@ Windows 会直接把控件的名字和矩形交出来，点击就变成"取矩�
 - 同一个目标试了 2 次都没进展、且原因明显是"我不知道你要哪个"
 - **不要**问「下一步做什么」这种该自己判断的问题；能自己看截图确认的就别问
 - 一次只问一个问题，问完就继续干
+
+## 答题 / 测验页面（硬规则，必须遵守）
+看到「章节测验」「作业」「单选题 / 多选题 / 判断题」这类页面时，**目标是"把题答对"，不是"把按钮点掉"**：
+
+1. **绝对禁止空着提交**：只要还有题没选，就不许点「提交 / 交卷 / 完成」。提交是不可撤销的，
+   交上去 0 分就再也改不回来了——这是整个演示里代价最大的一次误操作。
+2. 提交前必须先在 thought 里逐题点名核对，例如：
+   「已答：1 单选 B；2 单选 A；3 多选 ABD；4 单选 C —— 4 题全部作答，可以提交」。
+   没有这段话就别点提交。
+3. 一题一动作：读到题干和选项 → 想清楚答案 → 点对应选项（单选点圆点、多选依次点方框）→
+   再读下一题。**不要一次点一堆坐标**，点完必须看下一帧确认选中状态（圆点变实心 / 方框打勾）。
+4. 选项读不清（字号小、被遮挡）→ 先 `{"type":"zoom",...}` 放大再读；还不行就 `ask` 问用户，
+   绝不允许"看不清就随便选"或"看不清就跳过"。
+5. 题目涉及课程特有的内容时，先 `{"type":"knowledge","query":"题干关键词"}` 查本地知识库（导入过课件才有料），
+   还是查不到再 sk 让用户给答案，但绝不要瞎猜：sk 永远比猜错便宜。
+6. 题目内容超出你能力的（专业术语、课程特有的定义）→ sk 让用户给答案或确认，
+   不要靠猜；猜错比问一句代价大得多。
+6. 多选题少选也算错：勾完每一个你确定的选项，并在提交前复查可选数量（题干里的"多选"通常 2~4 个）。
+7. 提交后如果结果页出现红叉/低分，**不要急着往下翻**：先记下哪几题错了，
+   并 `{"type":"ask",...}` 说明情况，让用户决定要不要重做（很多平台不允许重考）。
+
 
 ## 看不清怎么办（重要）
 截图分辨率有限，小图标、小字、菜单项常常糊。**先放大再看，不要猜坐标**：
@@ -914,6 +937,21 @@ class ScreenController:
                     )
                     continue
 
+                if action["type"] == "knowledge":
+                    # 答题前先查本地知识库：结果回到下一帧的提示词里，不用额外截图
+                    query = str(action.get("query") or "")
+                    observation = await self._run_knowledge(query)
+                    runner.frame_context.append(f"【查知识库·{query[:24]}】{observation}")
+                    await bus.publish(
+                        channel,
+                        {"type": "notice", "level": "info",
+                         "message": f"查知识库：{observation[:70]}"},
+                    )
+                    await self._save_step(
+                        session_id, state, runner, thought or "查知识库", action, shot_url, "info"
+                    )
+                    continue
+
                 if action["type"] == "zoom":
                     region = action.get("region") or {}
                     if (
@@ -1343,6 +1381,29 @@ class ScreenController:
         )
         await self.resume(session_id)
         return {"ok": True, "session_id": session_id, "answer": text}
+
+    async def _run_knowledge(self, query: str) -> str:
+        """查本地知识库（答题/查资料用）。结果作为取证回到下一帧的提示词里。"""
+        query = (query or "").strip()
+        if not query:
+            return "查询为空"
+        try:
+            from app.core.state import state as app_state
+
+            store = getattr(app_state, "store", None)
+            if store is None:
+                return "知识库未初始化（后端启动时 RAG 没起来），这次答题只能靠你自己的知识"
+            hits = await store.search_knowledge(query, top_k=4)
+            if not hits:
+                return f"知识库没有「{query[:30]}」相关内容，改为用自己的知识判断"
+            lines = []
+            for hit in hits[:4]:
+                text = str(hit.get("text") or "").replace("\n", " ")[:180]
+                lines.append(f"[{float(hit.get('score') or 0):.2f}] {text}")
+            return "命中：\n" + "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("知识库检索失败: %s", exc)
+            return f"知识库检索失败（{exc}），用自己的知识判断"
 
     async def _run_probe(self, probe: dict[str, Any]) -> str:
         """帧内取证：只读，不改变桌面。"""
