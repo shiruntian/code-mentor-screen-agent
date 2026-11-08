@@ -125,6 +125,8 @@ def parse_keys(value: Any) -> list[str]:
 
 # --------------------------------------------------------------------------- 动作
 _CLICK_KINDS = {"click", "double_click", "right_click", "move"}
+# 滚轮格数达到这个值就改用键盘整屏翻页（滚轮一格 3 行，太慢）
+_KEYBOARD_SCROLL_THRESHOLD = 6
 _MAX_SEQUENCE = 6
 
 
@@ -372,6 +374,13 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
         elif kind == "pageup":
             direction = "up"
         key = "pageup" if direction in ("up", "向上", "prev", "上") else "pagedown"
+        try:
+            times = int(action.get("times") or action.get("count") or 1)
+        except (TypeError, ValueError):
+            times = 1
+        times = max(1, min(times, 5))
+        if times > 1:
+            return {"type": "sequence", "actions": [{"type": "key", "key": key}] * times}
         return {"type": "key", "key": key}
     if kind == "sequence":
         raw_steps = action.get("actions") or action.get("steps") or []
@@ -1435,6 +1444,19 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
         return _describe(normalized)
 
     if kind == "scroll":
+        amount = int(normalized["amount"])
+        # 大跨度（≥6 格）一律改走键盘整屏翻页：滚轮一格才 3 行，
+        # 而且一次滚动要占掉一整个决策周期，实测比 PageDown 慢好几倍。
+        if abs(amount) >= _KEYBOARD_SCROLL_THRESHOLD:
+            key = "pagedown" if amount < 0 else "pageup"
+            times = max(1, min(abs(amount) // _KEYBOARD_SCROLL_THRESHOLD, 3))
+            for i in range(times):
+                pyautogui.press(key)
+                if i + 1 < times:
+                    time.sleep(0.15)
+            time.sleep(0.35)
+            return f"键盘翻页 {key} ×{times}（原 {abs(amount)} 格滚轮）"
+
         x = _denormalize(normalized["x"], width) if normalized.get("x") is not None else None
         y = _denormalize(normalized["y"], height) if normalized.get("y") is not None else None
         if x is None or y is None:
@@ -1442,7 +1464,7 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
             # 某个不可滚动的容器上，滚多少下页面都不动（实测踩过这个坑）
             x, y = width // 2, int(height * 0.55)
         pyautogui.moveTo(x, y, duration=0.12)
-        pyautogui.scroll(normalized["amount"])
+        pyautogui.scroll(amount)
         # 等平滑滚动动画结束再截下一帧，否则截到动画中间会被判成"没变化"
         time.sleep(0.28)
         return _describe(normalized)

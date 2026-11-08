@@ -93,7 +93,8 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 鼠标（坐标 0~1000，截图上有青色网格与刻度，可直接估读）：
 - {"type":"click","x":430,"y":210}  单击；另有 double_click / right_click
 - {"type":"drag","x":200,"y":300,"to_x":600,"to_y":500}
-- {"type":"scroll","direction":"down","amount":8}  滚轮，amount 是格数（1~20），优先用它而不是拖滚动条
+- {"type":"scroll","direction":"down","amount":2}  滚轮，amount 是格数（1~20）；≥6 会自动转成键盘翻页
+- {"type":"page","direction":"down","times":2}  键盘整屏翻页（首选，比滚轮快）
 - {"type":"page","direction":"down"}  整页翻动，等价于 pagedown / pageup
 - {"type":"zoom","x":500,"y":400,"w":300,"h":200}  **放大看某块区域**（不点不改，只是把这块放大 3 倍重新截图，看清图标和文字后再操作）
 - {"type":"zoom","reset":true}  切回全屏视角（放大完记得切回来）
@@ -122,14 +123,18 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 - VS Code：命令面板 ctrl+shift+p ｜ 快速打开 ctrl+p ｜ 集成终端 ctrl+` ｜ 注释 ctrl+/
 - 取消 / 关弹窗：esc
 
-## 滚动与翻页（不要拖滚动条！）
-按场景选手段，优先级从左到右：
-1. **页面内上下移动** → `{"type":"scroll","direction":"down","amount":8}`（一格约 3 行，8 格约一屏多一点）
-2. **整页翻动** → `{"type":"page","direction":"down"}`（或 key=pagedown / pageup）
-3. **跳到最顶/最底** → `ctrl+home` / `ctrl+end`（列表、文档、网页都适用）
-4. **在资源管理器里上下找文件** → 直接输入文件名首字母，或 ctrl+l 输完整路径后回车，比慢慢滚快得多
-5. **横向滚动** → `scroll` 配合 shift，或 `hotkey shift + scroll`
-滚动前先点一下内容区，确保焦点在可滚动的面板里；滚动条本身很窄，**不要用 drag 去拖它**，失败率极高。
+## 滚动与翻页（优先键盘，别拖滚动条）
+**能用键盘就别用滚轮**——滚轮一格才 3 行，一次滚动还要占掉一整个决策周期，比翻页慢好几倍。
+按场景选手段：
+1. **整页翻动（首选）** → `{"type":"page","direction":"down"}`；
+   一次翻多屏加 `"times":2`（最多 5），翻长页面比连点滚轮快得多
+2. **跳到最顶/最底** → `{"type":"hotkey","keys":["ctrl","end"]}` / `["ctrl","home"]`
+   （列表、文档、网页都适用，一步到底）
+3. **只挪一点点**（要看漏掉的一行、要露出按钮） → `{"type":"scroll","direction":"down","amount":2}`
+   注：`amount ≥ 6` 会被自动改成键盘整屏翻页，不用你来算
+4. **在资源管理器里上下找文件** → 直接输入文件名首字母，或 ctrl+l 输完整路径回车
+5. **横向滚动** → `scroll` 配合 shift
+键盘翻页前要让页面拿到焦点：先点一下内容区空白处；滚动条本身很窄，**不要用 drag 去拖它**。
 
 ## 控件树（比看截图准得多，优先用）
 Windows 会直接把控件的名字和矩形交出来，点击就变成"取矩形中心"，不用认字也不用估格：
