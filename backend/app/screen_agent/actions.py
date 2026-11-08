@@ -1020,6 +1020,38 @@ def list_windows() -> list[dict[str, Any]]:
     return wins
 
 
+def foreground_window() -> dict[str, Any]:
+    """当前前台窗口的 {hwnd, title, process}（没有就空 dict）。"""
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return {}
+        length = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = (buf.value or "").strip()
+        name = ""
+        for win in list_windows():
+            if win["hwnd"] == int(hwnd):
+                name = win["process"]
+                break
+        return {"hwnd": int(hwnd), "title": title, "process": name}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读前台窗口失败: %s", exc)
+        return {}
+
+
+def minimize_window(hwnd: int) -> bool:
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        return bool(user32.ShowWindow(int(hwnd), 6))  # SW_MINIMIZE
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("最小化窗口失败: %s", exc)
+        return False
+
+
 def _focus_window(query: str) -> str:
     """把标题/进程名匹配到的窗口切到前台。用 Win32 直接激活，不靠 alt+tab 猜顺序。"""
     wins = list_windows()

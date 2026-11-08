@@ -433,6 +433,8 @@ class Runner:
     skip_streak: int = 0                              # 连续跳过模型调用的次数
     same_frame_streak: int = 0                        # 连续「画面与上一帧完全一样」的次数
     click_history: list[dict[str, Any]] = field(default_factory=list)  # 最近点过哪里（防重复勾选）
+    console_tucked: bool = False                      # 是否已经替用户最小化过控制台
+    last_cheap_action: bool = False                   # 上一步是 wait/key/scroll 这类便宜动作
     recent_fps: list[str] = field(default_factory=list)                # 最近动作指纹（防死循环）
     last_think_at: float = 0.0                        # 上次调用模型的时间
     last_shot_at: float = 0.0                         # 上次抓帧的时间
@@ -781,7 +783,10 @@ class ScreenController:
                 runner.skip_streak = 0
 
                 # 1.9) 决策节流：两次问模型之间至少隔 interval_ms
+                #      wait / 按键 / 滚动这类动作不需要等画面"沉淀"，只留很短缓冲
                 think_gap = float(state["interval_ms"]) / 1000.0
+                if runner.last_cheap_action:
+                    think_gap = min(think_gap, 0.45)
                 since_last = time.perf_counter() - (runner.last_think_at or 0.0)
                 if runner.last_think_at and since_last < think_gap:
                     await asyncio.sleep(think_gap - since_last)
@@ -1065,6 +1070,25 @@ class ScreenController:
                     await session.commit()
                     await session.refresh(step)
 
+                # 3.85) focus 不带标题：默认切回本轮的演示目标，省得模型猜
+                if action.get("type") == "focus" and not action.get("query"):
+                    action["query"] = runner.app_scope or ""
+                    if action["query"]:
+                        runner.frame_context.append(
+                            f"（系统：focus 没写标题，按演示目标 {action['query']} 处理）"
+                        )
+
+                # 3.9) 前台是自家控制台就先让开：点它等于白点，画面也不会动
+                if action.get("type") not in ("wait", "done", "plan", "step", "probe", "knowledge",
+                                             "web_search", "web_open", "ask", "focus", "zoom"):
+                    room_note = await self._make_room(runner)
+                    if room_note:
+                        runner.frame_context.append(room_note)
+                        await bus.publish(
+                            channel,
+                            {"type": "notice", "level": "info", "message": room_note[:70]},
+                        )
+
                 # 4) 执行动作
                 if action.get("type") in ("click", "double_click", "right_click"):
                     try:
@@ -1097,6 +1121,9 @@ class ScreenController:
                         "scope": runner.app_scope,
                         "step": step_idx,
                     }
+                runner.last_cheap_action = action["type"] in (
+                    "wait", "key", "hotkey", "scroll", "page", "type",
+                )
                 runner.signatures.append(signature)
                 runner.signatures = runner.signatures[-6:]
                 runner.recent.append(f"第{step_idx}步：{describe_action(action)} → {detail}")
@@ -1250,7 +1277,7 @@ class ScreenController:
             logger.debug("复盘失败（不影响主流程）: %s", exc)
 
     # ------------------------------------------------------------------ 经验判定
-    RETRY_DELAYS = (5.0, 10.0)   # 第一次原地重试等 5 秒，第二次等 10 秒
+    RETRY_DELAYS = (1.5, 3.0)   # 多数"没变化"是点空了而非加载慢，别为它干等 15 秒
 
     async def _save_step(
         self,
@@ -1467,6 +1494,37 @@ class ScreenController:
             "**已经选中的选项不要再点**，点了会取消。"
         )
 
+    # 自家界面的窗口标题特征：这些窗口永远不是演示目标
+    # 只认自家的演示控制台；不要放 CodeMentor 之类，否则用户就是来演示这个应用时会被误伤
+    OWN_UI_TITLES = ("屏幕演示控制台", "屏幕演示面板", "演示控制台", "屏幕演示 -")
+
+    def _is_own_window(self, title: str) -> bool:
+        t = (title or "").lower()
+        return any(k.lower() in t for k in self.OWN_UI_TITLES)
+
+    async def _make_room(self, runner: "Runner") -> str:
+        """前台被自家控制台占着时先让开：点它等于白点，画面也不会动。
+
+        这是实测踩过的坑：控制台浮在答题页上面，模型连点 13 下全部打在控制台上，
+        每次都判"没变化"，然后继续换坐标——整轮演示就这么废了。
+        """
+        try:
+            from app.screen_agent.actions import foreground_window, minimize_window
+
+            info = await asyncio.to_thread(foreground_window)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读前台窗口失败: %s", exc)
+            return ""
+        title = str(info.get("title") or "")
+        if not title or not self._is_own_window(title):
+            return ""
+
+        ok = await asyncio.to_thread(minimize_window, int(info["hwnd"]))
+        if not ok:
+            return "⚠️ 前台是演示控制台（自家界面），点它会白白浪费一步；请先把它最小化再继续"
+        await asyncio.sleep(0.45)
+        return "（系统：演示控制台挡住了目标窗口，已自动最小化它，继续操作）"
+
     async def _run_knowledge(self, query: str) -> str:
         """查本地知识库（答题/查资料用）。结果作为取证回到下一帧的提示词里。"""
         query = (query or "").strip()
@@ -1651,7 +1709,7 @@ class ScreenController:
 
         返回 "retried" 表示已经原地重试过（本轮不再问模型）；
         返回 "" 表示正常继续。
-        策略：没反应 → 等 5 秒重试一次 → 再没反应 → 等 10 秒重试一次 → 仍没反应 → 换方案。
+        策略：没反应 → 1.5 秒后重试一次 → 3 秒后重试一次 → 仍没反应 → 换方案。
         **任何情况下都不自动暂停**，只有模型出错才会中断。
         """
         pend = runner.pending
@@ -1736,10 +1794,10 @@ class ScreenController:
                 {
                     "type": "notice",
                     "level": "warning",
-                    "message": f"「{desc}」还是没反应，等 10 秒后放大刚才那块区域，重新确认位置再点",
+                    "message": f"「{desc}」还是没反应，放大刚才那块区域，重新确认位置再点",
                 },
             )
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.8)
             return ""
 
         if attempt < len(self.RETRY_DELAYS):
