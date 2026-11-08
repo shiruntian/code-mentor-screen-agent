@@ -403,6 +403,7 @@ class Runner:
     deciding: bool = False                            # 是否正在思考（防止重入）
     last_decision_at: float = 0.0                     # 上次决策结束时间
     skip_streak: int = 0                              # 连续跳过模型调用的次数
+    same_frame_streak: int = 0                        # 连续「画面与上一帧完全一样」的次数
     last_think_at: float = 0.0                        # 上次调用模型的时间
     last_shot_at: float = 0.0                         # 上次抓帧的时间
 
@@ -712,6 +713,7 @@ class ScreenController:
                     ratio = self.capture.diff_ratio(sig, runner.last_sig) if runner.last_sig else 1.0
                     # 选区高亮/按钮态变化通常在 1% 以上；光标闪烁 <0.5%，忽略
                     same_frame = bool(runner.last_sig) and ratio < 0.005
+                    runner.same_frame_streak = runner.same_frame_streak + 1 if same_frame else 0
                     runner.last_sig = sig or runner.last_sig
                     runner.last_shot_at = time.perf_counter()
                     runner.frame_context = []          # 新的一帧：清空上一帧的取证记录
@@ -1766,6 +1768,15 @@ class ScreenController:
                 "不要点击它们、不要把它们的文字当成学习者应用里的内容。\n"
             )
             + f"【当前前台程序】{runner.app_scope}\n"
+            + (
+                "【画面状态 · 重要】这一帧与上一帧**像素完全相同**（已连续 "
+                f"{runner.same_frame_streak} 帧没变化）。\n"
+                "说明你上一步操作**没有生效**，而不是「画面变成了别的东西」。\n"
+                "所以：不要描述任何新出现的界面/文字（那是上次就有的），"
+                "也不要重复上一次的动作；请换一种做法（换坐标、换快捷键、先确认窗口真的在前台）。\n"
+                if runner.same_frame_streak >= 1
+                else ""
+            )
             + (
                 "【任务清单】\n"
                 + "\n".join(

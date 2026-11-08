@@ -862,16 +862,32 @@ def _type_text(text: str, fixed: bool = False) -> str:
     return f"输入文本（按键，已切英文）{suffix}：{cleaned[:36]}"
 
 
-def _cursor_delta(x: int, y: int) -> str:
-    """校验光标真实落点：若和预期差得多，说明 DPI/缩放不一致，坐标不可信。"""
+def _realign_cursor(x: int, y: int) -> str:
+    """点完核对光标落点；偏了就回正一次再判断，仍然偏才提醒模型。
+
+    有的程序（游戏、部分全屏应用）会自己把光标挪到别处，这一步能救回大半「点偏」。
+    """
     try:
+        time.sleep(0.08)
         actual = pyautogui.position()
         dx = int(actual.x) - int(x)
         dy = int(actual.y) - int(y)
-        if abs(dx) > 3 or abs(dy) > 3:
-            logger.warning("点击落点偏差 dx=%s dy=%s（预期 %s,%s 实际 %s,%s）", dx, dy, x, y, actual.x, actual.y)
-            return f"；⚠️光标实际落在 ({actual.x}, {actual.y})，偏差 ({dx:+d}, {dy:+d})，坐标可能被缩放假偏"
-        return ""
+        if abs(dx) <= 3 and abs(dy) <= 3:
+            return ""
+        # 偏了：再挪一次（有些程序在鼠标停止后才吸附光标，第二下才稳）
+        pyautogui.moveTo(x, y, duration=0.05)
+        time.sleep(0.12)
+        again = pyautogui.position()
+        dx2 = int(again.x) - int(x)
+        dy2 = int(again.y) - int(y)
+        if abs(dx2) <= 3 and abs(dy2) <= 3:
+            logger.info("光标首次落点偏 (%+d,%+d)，回正成功", dx, dy)
+            return "（首次落点偏了，已回正）"
+        logger.warning("点击落点偏差 dx=%s dy=%s（预期 %s,%s 实际 %s,%s）", dx2, dy2, x, y, again.x, again.y)
+        return (
+            f"；⚠️光标实际落在 ({again.x}, {again.y})，偏差 ({dx2:+d}, {dy2:+d})，"
+            "目标程序可能在挪光标，这一下可能没点中"
+        )
     except Exception:  # noqa: BLE001
         return ""
 
@@ -1002,10 +1018,12 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
             pyautogui.rightClick(x, y)
         else:
             pyautogui.click(x, y)
+        # 有些程序（游戏、全屏应用）会自己把光标挪走，导致点偏；先回正一次再判偏差
+        note = _realign_cursor(x, y)
         # 点任务栏/开始菜单后，程序启动需要时间，别急着判"没反应"
         if y is not None and height and y > height * 0.93:
             time.sleep(1.6)
-        return f"{_describe(normalized)} → 像素 ({x}, {y}){_cursor_delta(x, y)}"
+        return f"{_describe(normalized)} → 像素 ({x}, {y}){note}"
 
     if kind == "plan":
         return f"重写任务清单（{len(action['steps'])} 步）"
