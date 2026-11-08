@@ -77,12 +77,26 @@ def test_f5_blocked_even_without_quiz_word():
     assert ctl._blocked_reload(state, {"type": "key", "key": "f5"}) == ""
 
 def test_snap_to_letter_when_clicking_option_text():
-    """实测：点选项文字（x≈315）不生效，只有字母方块（x≈100）能切换勾选。"""
+    """点在某一行已选中的选项上却没生效 → 改点字母按钮。
+
+    用户实测点选项文字也能选中，所以只在"落点确实在某已选行上"时才纠正。
+    """
     ctl = ScreenController()
     runner = make_runner()
     runner.letter_x = 100.0
+    runner.mark_ys = [750.0]
     state = {"goal": "帮我答题并提交"}
     assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 315, "y": 755}) is True
+
+
+def test_no_snap_when_row_not_known():
+    """不知道点的是哪一行时不要瞎挪 x。"""
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = 100.0
+    runner.mark_ys = [200.0]
+    state = {"goal": "帮我答题"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 315, "y": 755}) is False
 
 
 def test_no_snap_without_letter_column():

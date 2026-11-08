@@ -376,6 +376,18 @@ Windows 会直接把控件的名字和矩形交出来，点击就变成"取矩�
 {"thought":"需要回到 VS Code，用 Alt+Tab 切换","action":{"type":"hotkey","keys":["alt","tab"]},"done":false}"""
 
 
+def _render_dom(data: dict[str, Any] | None) -> str:
+    """把 CDP 读到的页面结构渲染成给模型看的几行。"""
+    if not isinstance(data, dict):
+        return ""
+    try:
+        from app.screen_agent import webdom
+
+        return webdom.render_quiz(data)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def parse_action_json(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S).strip()
@@ -487,6 +499,9 @@ class Runner:
     measured: dict[str, bool] = field(default_factory=dict)  # 坐标 → 勾选状态（点过才知道）
     mark_ys: list[float] = field(default_factory=list)  # 本帧检测到的已选标记纵坐标（0~1000）
     letter_x: float | None = None                     # 选项字母按钮的横坐标（点错过一次就记住）
+    quiz_mode: bool = False                           # 本轮是不是答题任务（决定要不要扫勾选标记）
+    dom: dict[str, Any] | None = None                 # 网页 DOM 读到的结构（CDP 可用时）
+    dom_at: float = 0.0                               # 上次读 DOM 的时间
     web_queries: dict[str, int] = field(default_factory=dict)  # 查过的查询词 → 第几步
     kb_calls: int = 0                                 # 本轮查知识库几次
     kb_queries: dict[str, int] = field(default_factory=dict)
@@ -623,7 +638,10 @@ class ScreenController:
         runner = Runner(session_id=session_id)
         # 答题类任务开局先放大左半屏：小方框在整屏图里只有十几个像素，
         # 模型认不出「已选/未选」，一上来盲点会把已经选中的又取消掉
-        if any(w in str(row.goal or "") for w in ("测验", "答题", "做题", "考试")):
+        runner.quiz_mode = any(
+            w in str(row.goal or "") for w in ("测验", "答题", "做题", "考试", "答题卡")
+        )
+        if runner.quiz_mode:
             runner.zoom = {"x0": 0.0, "y0": 100.0, "x1": 460.0, "y1": 1000.0}
         # 接着上次的回答继续：模型提问会结束循环，回答后是新 Runner，不接上就白答了
         runner.answers = list(self._answers.get(session_id, []))
@@ -810,14 +828,28 @@ class ScreenController:
                     runner.last_sig = sig or runner.last_sig
                     runner.last_shot_at = time.perf_counter()
                     runner.current_image = shot["image"]   # 供局部比对（勾选框翻转）
-                    # 纯像素扫描左侧字母列：直接得到"哪几行是已选中的"，不用模型去猜
-                    try:
-                        marks = await asyncio.to_thread(self.capture.find_marks, shot["image"])
-                        runner.mark_ys = [round(float(m[1]), 0) for m in marks]
-                        if marks:
-                            runner.letter_x = round(sum(m[0] for m in marks) / len(marks), 0)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("勾选标记扫描失败: %s", exc)
+                    # 只有答题/测验类任务才扫描"已选中标记"：别的场景扫了没用，还费时间
+                    if runner.quiz_mode:
+                        # 浏览器开了调试端口的话，直接读 DOM（比认小方块准得多）
+                        if bool(getattr(settings, "screen_dom_reader", True)) and (
+                            time.perf_counter() - runner.dom_at > 2.0
+                        ):
+                            try:
+                                from app.screen_agent import webdom
+
+                                data = await webdom.read_quiz_any()
+                                runner.dom = data
+                                runner.dom_at = time.perf_counter()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug("DOM 读取失败: %s", exc)
+                                runner.dom_at = time.perf_counter()
+                        try:
+                            marks = await asyncio.to_thread(self.capture.find_marks, shot["image"])
+                            runner.mark_ys = [round(float(m[1]), 0) for m in marks]
+                            if marks:
+                                runner.letter_x = round(sum(m[0] for m in marks) / len(marks), 0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("勾选标记扫描失败: %s", exc)
                     runner.frame_context = []          # 新的一帧：清空上一帧的取证记录
                 except Exception as exc:  # noqa: BLE001
                     await self._fail(session_id, f"截图失败：{exc}")
@@ -1054,6 +1086,32 @@ class ScreenController:
                     )
                     await self._save_step(
                         session_id, state, runner, thought or "取证", action, shot_url, "info"
+                    )
+                    continue
+
+                if action["type"] == "dom_click":
+                    # 用 DOM 按字母点击，点完立刻重读一次状态
+                    try:
+                        from app.screen_agent import webdom
+
+                        outcome = await webdom.click_option(str(action.get("letter") or ""))
+                        await asyncio.sleep(0.35)
+                        fresh = await webdom.read_quiz_any()
+                        if fresh:
+                            runner.dom = fresh
+                            runner.dom_at = time.perf_counter()
+                        note = (
+                            f"已用 DOM 点击选项 {action.get('letter')}（{outcome}）"
+                            + ("，当前状态：" + webdom.render_quiz(fresh).replace("\n", "；")[:120] if fresh else "")
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        note = f"DOM 点击失败：{exc}"
+                    runner.frame_context.append(f"【DOM 点击】{note}")
+                    await bus.publish(
+                        channel, {"type": "notice", "level": "info", "message": note[:90]}
+                    )
+                    await self._save_step(
+                        session_id, state, runner, thought or "DOM 点选", action, shot_url, "info"
                     )
                     continue
 
@@ -1684,9 +1742,16 @@ class ScreenController:
             return False
         try:
             x = float(action.get("x") or 0)
+            y = float(action.get("y") or 0)
         except (TypeError, ValueError):
             return False
-        return x > letter_x + 40
+        if x <= letter_x + 40:
+            return False
+        # 只有落点确实落在"某一行选项"上才纠正：附近得有一个已选标记
+        for mark_y in runner.mark_ys:
+            if abs(float(mark_y) - y) <= 25:
+                return True
+        return False
 
     def _repeat_click_gap(
         self, runner: "Runner", action: dict[str, Any], step_idx: int
@@ -2187,6 +2252,12 @@ class ScreenController:
 
         # ---------------- 没反应：按 5s → 10s 升级重试，最后换方案 ----------------
         attempt = runner.retry_attempts
+        if runner.quiz_mode and runner.zoom:
+            # 放大视图里估坐标容易偏；答题时先切回全屏再重试
+            runner.zoom = None
+            runner.frame_context.append(
+                "【系统】已切回全屏——放大视图里估坐标容易偏，请按全屏刻度重新估一次"
+            )
         if attempt == 1:
             # 第二次不再盲重点：放大刚才那块区域并标出上次点击的位置，让模型看清楚再决定
             runner.retry_attempts = 2
@@ -2445,14 +2516,32 @@ class ScreenController:
                 else ""
             )
             + (
-                "【系统检测到的已选标记】左侧字母列现有 "
-                + str(len(runner.mark_ys))
-                + " 个实心彩色方块，纵坐标 y≈"
-                + "/".join(f"{y:.0f}" for y in runner.mark_ys[:12])
-                + "（全屏 0~1000）。这些行上的选项**现在是已选中的**，"
-                "对照截图看清是哪个字母，不要去点它们；要补选就点没有标记的那些。\n"
-                if runner.mark_ys
-                else "【系统检测】左侧字母列没有检测到已选标记——说明当前一题都没选。\n"
+                (
+                    "【网页 DOM 情报 · 最可靠】\n"
+                    + _render_dom(runner.dom)
+                    + "\n"
+                    + "（这是直接读网页结构得到的真实状态。勾选优先用 "
+                    '{"type":"dom_click","letter":"B"}，不用估坐标：'
+                    "它会按字母精确点那一条，点完再看一眼这个情报确认）\n"
+                    if runner.dom
+                    else ""
+                )
+                if runner.quiz_mode
+                else ""
+            )
+            + (
+                (
+                    "【系统检测到的已选标记】左侧字母列现有 "
+                    + str(len(runner.mark_ys))
+                    + " 个实心彩色方块，纵坐标 y≈"
+                    + "/".join(f"{y:.0f}" for y in runner.mark_ys[:12])
+                    + "（全屏 0~1000）。这些行上的选项**现在是已选中的**，"
+                    "对照截图看清是哪个字母，不要去点它们；要补选就点没有标记的那些。\n"
+                    if runner.mark_ys
+                    else "【系统检测】左侧字母列没有检测到已选标记——说明当前一题都没选。\n"
+                )
+                if runner.quiz_mode
+                else ""
             )
             + (
                 "【你已确认的勾选状态】"

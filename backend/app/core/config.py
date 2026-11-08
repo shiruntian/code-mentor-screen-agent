@@ -135,6 +135,8 @@ class Settings(BaseSettings):
     screen_panic_enabled: bool = True
     # 屏幕演示向学习者提问时，弹一个置顶的原生小窗（浏览器做不到置顶）
     screen_ask_dialog: bool = True
+    # 浏览器开了调试端口时，直接读网页 DOM（比截图识别可靠得多）
+    screen_dom_reader: bool = True
 
     # ---------- 记忆 ----------
     short_term_window: int = 12  # 送给模型的最大消息条数

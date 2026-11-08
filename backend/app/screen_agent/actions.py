@@ -170,6 +170,13 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
         if not url:
             raise ActionError("web_open 需要 url（要读的网页地址）")
         return {"type": "web_open", "url": str(url)[:500]}
+    if kind in ("dom_click", "click_option", "dom_option"):
+        # 按字母点选项：走浏览器 DOM，不受坐标偏差影响（需要浏览器开着调试端口）
+        letter = action.get("letter") or action.get("option") or action.get("value")
+        if not letter:
+            raise ActionError("dom_click 需要 letter（A/B/C/D）")
+        return {"type": "dom_click", "letter": str(letter).strip().upper()[:1]}
+
     if kind in ("knowledge", "kb", "search_knowledge", "lookup"):
         # 查本地知识库（答题前先查课件/题库）
         query = action.get("query") or action.get("text") or action.get("q")
@@ -709,6 +716,8 @@ def _describe(action: dict[str, Any]) -> str:
         return f"切到窗口「{action.get('query')}」"
     if kind == "knowledge":
         return f"查知识库：{str(action.get('query'))[:30]}"
+    if kind == "dom_click":
+        return f"点选项 {action.get('letter')}（DOM）"
     if kind == "web_search":
         return f"联网搜索：{str(action.get('query'))[:40]}"
     if kind == "web_open":
@@ -1215,6 +1224,9 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
         return f"查知识库：{str(normalized.get('query'))[:40]}"
     if kind in ("web_search", "web_open"):
         # 联网动作也交给 controller 异步执行（别在 worker 线程里再开事件循环）
+        return _describe(normalized)
+    if kind == "dom_click":
+        # 真正的 DOM 点击在 controller 里异步执行
         return _describe(normalized)
     if kind == "wait":
         time.sleep(normalized["seconds"])
