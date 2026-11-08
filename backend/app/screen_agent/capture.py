@@ -120,6 +120,66 @@ class ScreenCapture:
         except Exception:  # noqa: BLE001
             return None
 
+    # 左侧字母列在画面里的水平范围（比例）。超星/学习通/多数题库都是这个版式
+    LETTER_BAND = (0.055, 0.145)
+
+    @classmethod
+    def find_marks(cls, image) -> list[tuple[float, float]]:  # noqa: ANN001
+        """扫描左侧字母列，返回"已选中"彩色方块的 (x, y) 归一化坐标（0~1000）。
+
+        纯像素判断，不依赖视觉模型：选中态是**实心彩色方块**（蓝/绿/橙），未选中是灰白描边。
+        有了它，模型就不用猜"哪几个已经勾上了"。
+
+        判定一行"属于方块"要同时满足三条，兼顾方块中间是白字、以及 ClearType 给黑字
+        边缘加的彩色条纹（条纹稀疏、跨度大，密度很低）：
+        1. 彩色像素 ≥ 10 个；
+        2. 这些像素的水平跨度 ≥ 14；
+        3. 密度(彩色/跨度) ≥ 0.45。
+        """
+        try:
+            rgb = image.convert("RGB")
+            w, h = rgb.size
+            x0 = int(w * cls.LETTER_BAND[0])
+            x1 = int(w * cls.LETTER_BAND[1])
+            data = rgb.load()
+            rows: list[tuple[int, int]] = []       # (y, 方块水平中心)
+            for y in range(int(h * 0.10), int(h * 0.98)):
+                xs = []
+                for x in range(x0, x1):
+                    r, g, b = data[x, y]
+                    hi, lo = max(r, g, b), min(r, g, b)
+                    if (hi - lo >= 50) and (hi >= 120) and (lo <= 200):
+                        xs.append(x)
+                if len(xs) < 10:
+                    continue
+                span = xs[-1] - xs[0] + 1
+                if span < 14 or len(xs) / span < 0.45:
+                    continue
+                rows.append((y, (xs[0] + xs[-1]) // 2))
+            if not rows:
+                return []
+            clusters: list[list[tuple[int, int]]] = [[rows[0]]]
+            for item in rows[1:]:
+                if item[0] - clusters[-1][-1][0] <= 6:
+                    clusters[-1].append(item)
+                else:
+                    clusters.append([item])
+            marks: list[tuple[float, float]] = []
+            for cluster in clusters:
+                ys = [c[0] for c in cluster]
+                xs = [c[1] for c in cluster]
+                if len(cluster) < 12:          # 太扁的不是方块
+                    continue
+                marks.append(
+                    (
+                        round(sum(xs) / len(xs) / w * 1000, 0),
+                        round((ys[0] + ys[-1]) / 2 / h * 1000, 0),
+                    )
+                )
+            return marks
+        except Exception:  # noqa: BLE001
+            return []
+
     @staticmethod
     def blue_score(region) -> float:  # noqa: ANN001
         """这块区域"有多蓝"（B 均值 - R 均值）。

@@ -485,6 +485,8 @@ class Runner:
     idle_streak: int = 0                              # 连续几步都在取证/等待，没做真动作
     must_act: str = ""                                # 非空时提示词里会强推"立刻动手"
     measured: dict[str, bool] = field(default_factory=dict)  # 坐标 → 勾选状态（点过才知道）
+    mark_ys: list[float] = field(default_factory=list)  # 本帧检测到的已选标记纵坐标（0~1000）
+    letter_x: float | None = None                     # 选项字母按钮的横坐标（点错过一次就记住）
     web_queries: dict[str, int] = field(default_factory=dict)  # 查过的查询词 → 第几步
     kb_calls: int = 0                                 # 本轮查知识库几次
     kb_queries: dict[str, int] = field(default_factory=dict)
@@ -808,6 +810,14 @@ class ScreenController:
                     runner.last_sig = sig or runner.last_sig
                     runner.last_shot_at = time.perf_counter()
                     runner.current_image = shot["image"]   # 供局部比对（勾选框翻转）
+                    # 纯像素扫描左侧字母列：直接得到"哪几行是已选中的"，不用模型去猜
+                    try:
+                        marks = await asyncio.to_thread(self.capture.find_marks, shot["image"])
+                        runner.mark_ys = [round(float(m[1]), 0) for m in marks]
+                        if marks:
+                            runner.letter_x = round(sum(m[0] for m in marks) / len(marks), 0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("勾选标记扫描失败: %s", exc)
                     runner.frame_context = []          # 新的一帧：清空上一帧的取证记录
                 except Exception as exc:  # noqa: BLE001
                     await self._fail(session_id, f"截图失败：{exc}")
@@ -922,6 +932,10 @@ class ScreenController:
                 repeat_hit = self._repeat_click_gap(
                     runner, action, state["current_step"] + 1
                 )
+                # 如果系统已经测出这个位置现在是"未选中"，那再点一下就是**重新选中**，
+                # 属于纠错，不能拦；只有"已选中还去点"才会取消勾选，才需要拦。
+                if repeat_hit is not None and self._spot_is_selected(runner, action) is False:
+                    repeat_hit = None
                 if repeat_hit is not None and action.get("type") in ("click", "double_click"):
                     px = float(action.get("x") or 0)
                     py_ = float(action.get("y") or 0)
@@ -1631,6 +1645,49 @@ class ScreenController:
             return True
         return False
 
+    def _spot_is_selected(self, runner: "Runner", action: dict[str, Any]) -> bool | None:
+        """这个位置现在是不是已选中？（None = 没测过）"""
+        try:
+            y = float(action.get("y"))
+        except (TypeError, ValueError):
+            return None
+        # 优先用本帧扫描到的标记：它在纵向上和"已选中的选项"一一对应
+        for mark_y in runner.mark_ys:
+            if abs(mark_y - y) <= 22:
+                return True
+        if runner.mark_ys:
+            return False          # 有标记数据但这一行没有 → 就是没选中
+        try:
+            key = (
+                f"{int(round(float(action.get('x')) / 10) * 10)},"
+                f"{int(round(y / 10) * 10)}"
+            )
+        except (TypeError, ValueError):
+            return None
+        return runner.measured.get(key)
+
+    def _should_snap_to_letter(
+        self, state: dict[str, Any], runner: "Runner", action: dict[str, Any]
+    ) -> bool:
+        """是不是"点在选项文字上"？是的话应该改点左侧字母按钮。
+
+        实测：超星这类页面只有字母方块是有效热区，点选项文字不生效——
+        日志里 x≈315 的点击全部没反应，x≈100 的点击都成功切换了勾选。
+        """
+        goal = str(state.get("goal") or "")
+        if not any(w in goal for w in self.QUIZ_WORDS):
+            return False
+        if action.get("type") != "click" or action.get("y") is None:
+            return False
+        letter_x = runner.letter_x
+        if letter_x is None:
+            return False
+        try:
+            x = float(action.get("x") or 0)
+        except (TypeError, ValueError):
+            return False
+        return x > letter_x + 40
+
     def _repeat_click_gap(
         self, runner: "Runner", action: dict[str, Any], step_idx: int
     ) -> int | None:
@@ -2107,6 +2164,27 @@ class ScreenController:
             )
             return ""
 
+        # ---------------- 点在选项文字上？自动改点字母按钮 ----------------
+        if self._should_snap_to_letter(state, runner, action):
+            fixed = dict(action)
+            fixed["x"] = float(runner.letter_x or 100)
+            try:
+                _ok2, detail2 = await self._execute_action(fixed, screen_size, False)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("改点字母按钮失败: %s", exc)
+            else:
+                runner.frame_context.append(
+                    "【系统】刚才点在选项文字上没生效，已自动改点左侧字母按钮；"
+                    f"以后点选项直接点字母（x≈{int(runner.letter_x or 100)}）"
+                )
+                await bus.publish(
+                    channel,
+                    {"type": "notice", "level": "info",
+                     "message": f"点在文字上没生效，已改点字母按钮（x≈{int(runner.letter_x or 100)}）"},
+                )
+                runner.last_action = f"改点字母按钮 -> {detail2}"
+                return ""
+
         # ---------------- 没反应：按 5s → 10s 升级重试，最后换方案 ----------------
         attempt = runner.retry_attempts
         if attempt == 1:
@@ -2365,6 +2443,16 @@ class ScreenController:
                 + "\n（这些是系统真实查到的：控件树 / 知识库 / 联网结果，优先采信它们，别凭空猜）\n"
                 if runner.frame_context
                 else ""
+            )
+            + (
+                "【系统检测到的已选标记】左侧字母列现有 "
+                + str(len(runner.mark_ys))
+                + " 个实心彩色方块，纵坐标 y≈"
+                + "/".join(f"{y:.0f}" for y in runner.mark_ys[:12])
+                + "（全屏 0~1000）。这些行上的选项**现在是已选中的**，"
+                "对照截图看清是哪个字母，不要去点它们；要补选就点没有标记的那些。\n"
+                if runner.mark_ys
+                else "【系统检测】左侧字母列没有检测到已选标记——说明当前一题都没选。\n"
             )
             + (
                 "【你已确认的勾选状态】"

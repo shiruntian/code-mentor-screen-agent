@@ -75,3 +75,43 @@ def test_f5_blocked_even_without_quiz_word():
     ctl = ScreenController()
     state = {"goal": "刷新一下这个网页"}
     assert ctl._blocked_reload(state, {"type": "key", "key": "f5"}) == ""
+
+def test_snap_to_letter_when_clicking_option_text():
+    """实测：点选项文字（x≈315）不生效，只有字母方块（x≈100）能切换勾选。"""
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = 100.0
+    state = {"goal": "帮我答题并提交"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 315, "y": 755}) is True
+
+
+def test_no_snap_without_letter_column():
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = None
+    state = {"goal": "帮我答题"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 315, "y": 755}) is False
+
+
+def test_no_snap_when_click_already_on_letter():
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = 100.0
+    state = {"goal": "帮我答题"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 105, "y": 755}) is False
+
+
+def test_no_snap_outside_quiz_goal():
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = 100.0
+    state = {"goal": "打开记事本写代码"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "click", "x": 315, "y": 755}) is False
+
+
+def test_no_snap_for_non_click():
+    ctl = ScreenController()
+    runner = make_runner()
+    runner.letter_x = 100.0
+    state = {"goal": "帮我答题"}
+    assert ctl._should_snap_to_letter(state, runner, {"type": "scroll", "amount": -5}) is False
