@@ -159,6 +159,17 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
         if not query:
             raise ActionError("focus 需要 title（窗口标题片段）或 app（进程名片段）")
         return {"type": "focus", "query": str(query)[:80]}
+    if kind in ("web_search", "search_web", "google", "baidu", "bing", "websearch"):
+        # 联网搜索：知识库没有的东西（课程外的常识、名词解释）靠它
+        query = action.get("query") or action.get("text") or action.get("q")
+        if not query:
+            raise ActionError("web_search 需要 query（搜索词）")
+        return {"type": "web_search", "query": str(query)[:200]}
+    if kind in ("web_open", "web_fetch", "open_url", "fetch_url"):
+        url = action.get("url") or action.get("link")
+        if not url:
+            raise ActionError("web_open 需要 url（要读的网页地址）")
+        return {"type": "web_open", "url": str(url)[:500]}
     if kind in ("knowledge", "kb", "search_knowledge", "lookup"):
         # 查本地知识库（答题前先查课件/题库）
         query = action.get("query") or action.get("text") or action.get("q")
@@ -673,6 +684,10 @@ def _describe(action: dict[str, Any]) -> str:
         return f"切到窗口「{action.get('query')}」"
     if kind == "knowledge":
         return f"查知识库：{str(action.get('query'))[:30]}"
+    if kind == "web_search":
+        return f"联网搜索：{str(action.get('query'))[:40]}"
+    if kind == "web_open":
+        return f"读网页：{str(action.get('url'))[:60]}"
     if kind == "key":
         return f"按键 {action['key']}"
     if kind == "type":
@@ -1141,6 +1156,9 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
     if kind == "knowledge":
         # 真正的检索在 controller 里异步执行（这里在 worker 线程里，碰 Qdrant 异步客户端不安全）
         return f"查知识库：{str(normalized.get('query'))[:40]}"
+    if kind in ("web_search", "web_open"):
+        # 联网动作也交给 controller 异步执行（别在 worker 线程里再开事件循环）
+        return _describe(normalized)
     if kind == "wait":
         time.sleep(normalized["seconds"])
         return _describe(normalized)
