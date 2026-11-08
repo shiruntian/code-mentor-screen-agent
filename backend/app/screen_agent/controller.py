@@ -432,6 +432,8 @@ class Runner:
     last_decision_at: float = 0.0                     # 上次决策结束时间
     skip_streak: int = 0                              # 连续跳过模型调用的次数
     same_frame_streak: int = 0                        # 连续「画面与上一帧完全一样」的次数
+    click_history: list[dict[str, Any]] = field(default_factory=list)  # 最近点过哪里（防重复勾选）
+    recent_fps: list[str] = field(default_factory=list)                # 最近动作指纹（防死循环）
     last_think_at: float = 0.0                        # 上次调用模型的时间
     last_shot_at: float = 0.0                         # 上次抓帧的时间
 
@@ -1069,7 +1071,16 @@ class ScreenController:
                         runner.last_click = (float(action.get("x", 0)), float(action.get("y", 0)))
                     except (TypeError, ValueError):
                         pass
+                    # 记录点位：勾选框/单选钮点第二次会**取消选中**，所以同一位置反复点必须提醒
+                    repeat_note = self._note_repeat_click(runner, action, step_idx)
+                    loop_note = self._loop_hint(runner, action)
+                    if loop_note:
+                        runner.frame_context.append(loop_note)
+                else:
+                    repeat_note = ""
                 ok, detail = await self._execute_action(action, screen_size, state["dry_run"])
+                if repeat_note:
+                    detail = f"{detail}{repeat_note}"
                 if state["dry_run"]:
                     await asyncio.sleep(0.4)
 
@@ -1397,6 +1408,64 @@ class ScreenController:
         )
         await self.resume(session_id)
         return {"ok": True, "session_id": session_id, "answer": text}
+
+    # 同一位置重复点击的判定半径（0~1000 坐标里的 ±25，约等于一个选项框的宽度）
+    REPEAT_CLICK_RADIUS = 25.0
+
+    def _note_repeat_click(self, runner: "Runner", action: dict[str, Any], step_idx: int) -> str:
+        """记录点击点位；同一位置 3 步内点过就提醒「再点会取消选中」。
+
+        单选/多选的勾选框是 toggle：点一次选中，再点一次取消。
+        模型看不清勾选状态时会反复点同一个框，看起来就是「选了又自己没了」。
+        """
+        if action.get("x") is None or action.get("y") is None:
+            return ""  # 没给坐标（比如按控件名点）就不参与重复判定
+        try:
+            x = float(action["x"])
+            y = float(action["y"])
+        except (TypeError, ValueError, KeyError):
+            return ""
+
+        radius = self.REPEAT_CLICK_RADIUS
+        hit = None
+        for item in runner.click_history[-6:]:
+            if abs(item["x"] - x) <= radius and abs(item["y"] - y) <= radius:
+                hit = item
+                break
+
+        runner.click_history.append({"x": x, "y": y, "step": step_idx})
+        runner.click_history = runner.click_history[-12:]
+
+        if hit is None:
+            return ""
+        gap = step_idx - int(hit["step"])
+        if gap <= 0 or gap > 3:
+            return ""
+        return (
+            f"；⚠️ 这个位置第 {hit['step']} 步刚点过（{gap} 步前）。"
+            "如果是选项框，再点一次就是**取消选中**——先确认它现在是勾上还是没勾"
+        )
+
+    def _loop_hint(self, runner: "Runner", action: dict[str, Any]) -> str:
+        """同一块区域反复操作时给一句强提醒（防死循环）。"""
+        try:
+            fp = (
+                f"{action['type']}:"
+                f"{round(float(action.get('x', 0)) / 25)}:"
+                f"{round(float(action.get('y', 0)) / 25)}"
+            )
+        except (TypeError, ValueError, KeyError):
+            return ""
+        runner.recent_fps.append(fp)
+        runner.recent_fps = runner.recent_fps[-12:]
+        same = sum(1 for f in runner.recent_fps if f == fp)
+        if same < 3:
+            return ""
+        return (
+            f"【疑似死循环】你已经在同一块区域做了 {same} 次类似动作，画面仍没变化。"
+            '先用 {"type":"zoom",...} 放大确认当前勾选/焦点状态，再决定要不要点；'
+            "**已经选中的选项不要再点**，点了会取消。"
+        )
 
     async def _run_knowledge(self, query: str) -> str:
         """查本地知识库（答题/查资料用）。结果作为取证回到下一帧的提示词里。"""
@@ -1908,7 +1977,14 @@ class ScreenController:
             f"{lessons_text}"
             f"{chat_view}"
             f"{verify}"
-            "截图上方与左侧是 0~1000 的坐标刻度，点击请按刻度估位。现在输出下一步动作 JSON。"
+            + (
+                "【本帧查到的外部信息】\n"
+                + "\n".join(runner.frame_context[-6:])
+                + "\n（这些是系统真实查到的：控件树 / 知识库 / 联网结果，优先采信它们，别凭空猜）\n"
+                if runner.frame_context
+                else ""
+            )
+            + "截图上方与左侧是 0~1000 的坐标刻度，点击请按刻度估位。现在输出下一步动作 JSON。"
         )
         message = HumanMessage(
             content=[

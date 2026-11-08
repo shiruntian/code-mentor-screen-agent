@@ -1368,9 +1368,14 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
     if kind == "scroll":
         x = _denormalize(normalized["x"], width) if normalized.get("x") is not None else None
         y = _denormalize(normalized["y"], height) if normalized.get("y") is not None else None
-        if x is not None and y is not None:
-            pyautogui.moveTo(x, y, duration=0.15)
+        if x is None or y is None:
+            # 滚轮事件只发给光标下的窗口/元素：光标要是停在控制面板、标题栏或
+            # 某个不可滚动的容器上，滚多少下页面都不动（实测踩过这个坑）
+            x, y = width // 2, int(height * 0.55)
+        pyautogui.moveTo(x, y, duration=0.12)
         pyautogui.scroll(normalized["amount"])
+        # 等平滑滚动动画结束再截下一帧，否则截到动画中间会被判成"没变化"
+        time.sleep(0.28)
         return _describe(normalized)
 
     raise ActionError(f"不支持的动作：{kind}")
