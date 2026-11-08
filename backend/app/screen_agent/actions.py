@@ -153,6 +153,12 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
 
     if kind == "done":
         return {"type": "done"}
+    if kind in ("focus", "activate", "switch_window", "bring_to_front"):
+        # 把某个窗口切到前台：比 alt+tab / win+tab 可靠得多（那两个要靠猜顺序和缩略图位置）
+        query = action.get("title") or action.get("app") or action.get("name") or action.get("keyword")
+        if not query:
+            raise ActionError("focus 需要 title（窗口标题片段）或 app（进程名片段）")
+        return {"type": "focus", "query": str(query)[:80]}
     if kind == "wait":
         try:
             seconds = float(action.get("seconds") or action.get("value") or 1.0)
@@ -657,6 +663,8 @@ def _describe(action: dict[str, Any]) -> str:
     kind = action["type"]
     if kind == "hotkey":
         return "组合键 " + "+".join(action.get("keys") or [])
+    if kind == "focus":
+        return f"切到窗口「{action.get('query')}」"
     if kind == "key":
         return f"按键 {action['key']}"
     if kind == "type":
@@ -893,7 +901,7 @@ def _realign_cursor(x: int, y: int) -> str:
 
 
 def _hotkey_slow(keys: list[str], interval: float = 0.06) -> None:
-    """组合键按下/抬起之间留间隔：太快时 Windows 会把 alt+tab 当成孤立 Alt。"""
+    # 组合键按下/抬起之间留间隔：太快时 Windows 会把 alt+tab 当成孤立 Alt
     for k in keys[:-1]:
         pyautogui.keyDown(k)
         time.sleep(interval)
@@ -902,6 +910,132 @@ def _hotkey_slow(keys: list[str], interval: float = 0.06) -> None:
     for k in reversed(keys[:-1]):
         pyautogui.keyUp(k)
         time.sleep(interval)
+
+
+# ------------------------------------------------------------------ 切窗口
+def match_window(
+    candidates: list[dict[str, Any]], query: str
+) -> dict[str, Any] | None:
+    """从窗口列表里挑最匹配的一个（纯函数，方便测试）。
+
+    candidates: [{"title": "...", "process": "nekopara_vol2", "hwnd": 123}]
+    打分顺序：标题完全相同 > 标题包含 > 进程名包含；同分时取标题更短的（更像主窗口）。
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for win in candidates:
+        title = str(win.get("title") or "").lower()
+        process = str(win.get("process") or "").lower()
+        if not title and not process:
+            continue
+        if title == q:
+            score = 100
+        elif q in title:
+            score = 80
+        elif q in process:
+            score = 60
+        elif process and process.split(".")[0] == q:
+            score = 70
+        else:
+            continue
+        key = (score, -len(title))
+        if best is None or key > (best[0], best[1]):
+            best = (score, -len(title), win)
+    return best[2] if best else None
+
+
+def list_windows() -> list[dict[str, Any]]:
+    """枚举所有可见的顶层窗口（标题 + 进程名 + hwnd）。"""
+    wins: list[dict[str, Any]] = []
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _lp):  # noqa: ANN001
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = (buf.value or "").strip()
+            if not title:
+                return True
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            name = ""
+            handle = kernel32.OpenProcess(0x1000, False, pid.value) if pid.value else None
+            if handle:
+                try:
+                    pbuf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(1024)
+                    if kernel32.QueryFullProcessImageNameW(handle, 0, pbuf, ctypes.byref(size)):
+                        name = pbuf.value.rsplit("\\", 1)[-1]
+                finally:
+                    kernel32.CloseHandle(handle)
+            wins.append({"hwnd": int(hwnd), "title": title, "process": name})
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("枚举窗口失败: %s", exc)
+    return wins
+
+
+def _focus_window(query: str) -> str:
+    """把标题/进程名匹配到的窗口切到前台。用 Win32 直接激活，不靠 alt+tab 猜顺序。"""
+    wins = list_windows()
+    target = match_window(wins, query)
+    if not target:
+        titles = "、".join(w["title"][:18] for w in wins[:6])
+        return f"没找到匹配「{query}」的窗口（当前可见：{titles}）"
+
+    hwnd = target["hwnd"]
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        SW_RESTORE = 9
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        # 前台锁：先把自己线程挂到当前前台窗口的输入队列上，否则 SetForegroundWindow 可能被拒
+        fg = user32.GetForegroundWindow()
+        tid_fg = user32.GetWindowThreadProcessId(fg, None)
+        tid_me = kernel32_dll.GetCurrentThreadId()
+        attached = False
+        if tid_fg and tid_fg != tid_me:
+            attached = bool(user32.AttachThreadInput(tid_me, tid_fg, True))
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        if attached:
+            user32.AttachThreadInput(tid_me, tid_fg, False)
+        time.sleep(0.35)
+        ok = user32.GetForegroundWindow() == hwnd
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("切换窗口失败: %s", exc)
+        return f"切换窗口失败：{exc}"
+
+    name = target["process"] or "?"
+    if ok:
+        return f"已切到「{target['title'][:30]}」（{name}）"
+    return f"已请求切到「{target['title'][:30]}」，但前台窗口没变，可能被系统拦了"
+
+
+kernel32_dll = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32_dll.GetCurrentThreadId.restype = wintypes.DWORD
 
 
 _SWITCH_KEYS = (("alt", "tab"), ("win", "tab"), ("alt", "f4"))
@@ -994,6 +1128,8 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
 
     if kind == "done":
         return "演示完成"
+    if kind == "focus":
+        return _focus_window(str(normalized.get("query") or ""))
     if kind == "wait":
         time.sleep(normalized["seconds"])
         return _describe(normalized)
