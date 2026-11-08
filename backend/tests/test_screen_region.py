@@ -76,3 +76,26 @@ def test_crop_region_survives_bad_box():
     img = frame(True)
     assert ScreenCapture.crop_region(img, (-10, -10, 5000, 5000)) is not None
     assert ScreenCapture.mean_diff(None, None) == 0.0
+
+def test_blue_score_tells_selected_from_unselected():
+    """超星选中态是蓝色实心方块：蓝度差能直接判断勾上/取消。"""
+    from PIL import Image, ImageDraw
+
+    def frame(selected: bool) -> Image.Image:
+        img = Image.new("RGB", (300, 60), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle(
+            (10, 10, 50, 50),
+            fill=(37, 99, 235) if selected else (240, 240, 240),
+            outline=(180, 180, 180),
+        )
+        return img
+
+    before = ScreenCapture.crop_region(frame(False), (0, 0, 1000, 1000))
+    after = ScreenCapture.crop_region(frame(True), (0, 0, 1000, 1000))
+    delta = ScreenCapture.blue_score(after) - ScreenCapture.blue_score(before)
+    assert delta >= 8, f"蓝度差 {delta} 太小，判断不出勾选"
+
+
+def test_blue_score_handles_none():
+    assert ScreenCapture.blue_score(None) == 0.0

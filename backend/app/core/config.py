@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # 演示期间把前台窗口输入法临时切到英文，结束时还原
     screen_ime_guard: bool = True
     # 视觉决策的输出上限：动作 JSON 很短，限制它可显著缩短生成时间
-    screen_max_tokens: int = 900
+    screen_max_tokens: int = 1400
     # 连续多少次「动作无效」就自动暂停（把控制权交回用户）
     screen_fail_streak_pause: int = 4
     # 发给视觉模型的截图最大宽度（2560 的屏幕缩到 1024 会看不清字）

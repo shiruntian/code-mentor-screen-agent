@@ -189,7 +189,7 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
                 if kind != "move":
                     raise ActionError(f"{kind} 需要坐标 x/y")
             else:
-                out[axis] = max(0.0, min(1000.0, float(action[axis])))
+                out[axis] = max(0.0, min(1000.0, _to_float(action[axis])))
         return out
     if kind == "drag":
         out = {"type": "drag"}
@@ -245,8 +245,8 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
             amount = -6                        # 默认向下滚一点
         out = {"type": "scroll", "amount": amount}
         if action.get("x") is not None and action.get("y") is not None:
-            out["x"] = max(0.0, min(1000.0, float(action["x"])))
-            out["y"] = max(0.0, min(1000.0, float(action["y"])))
+            out["x"] = max(0.0, min(1000.0, _to_float(action["x"])))
+            out["y"] = max(0.0, min(1000.0, _to_float(action["y"])))
         return out
 
     # 向用户提问：停下来等输入，拿到答案再继续
@@ -435,6 +435,31 @@ def _clipboard_set_text(text: str) -> bool:
             time.sleep(0.15)
     logger.warning("剪贴板写入失败（已重试）：%s", last_error)
     return False
+
+
+def _to_float(value: Any) -> float:
+    """把模型给的各种"数字"转成 float：兼容 [98] / "98px" / 98.0。
+
+    模型偶尔会把坐标写成数组（"x": [98]），直接 float() 会抛 TypeError 把整轮演示搞崩。
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ActionError("坐标是空数组")
+        value = value[0]
+    if isinstance(value, dict):
+        for key in ("value", "x", "y"):
+            if key in value:
+                return _to_float(value[key])
+        raise ActionError(f"坐标格式不对：{value}")
+    if isinstance(value, bool):
+        raise ActionError("坐标不能是布尔值")
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    m = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not m:
+        raise ActionError(f"坐标不是数字：{text[:20]}")
+    return float(m.group(0))
 
 
 def _denormalize(value: Any, size: int) -> int:

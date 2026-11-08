@@ -116,9 +116,26 @@ class ScreenCapture:
             y0 = max(0, min(h - 2, int(box[1] / 1000 * h)))
             x1 = max(x0 + 2, min(w, int(box[2] / 1000 * w)))
             y1 = max(y0 + 2, min(h, int(box[3] / 1000 * h)))
-            return image.crop((x0, y0, x1, y1)).convert("L")
+            return image.crop((x0, y0, x1, y1)).convert("RGB")
         except Exception:  # noqa: BLE001
             return None
+
+    @staticmethod
+    def blue_score(region) -> float:  # noqa: ANN001
+        """这块区域"有多蓝"（B 均值 - R 均值）。
+
+        超星/学习通这类平台的选中态是蓝色实心方块，取消后又变回灰白。
+        用这个指标能直接判断"刚才那一下是勾上还是取消"，不用模型去认小方框。
+        """
+        try:
+            if region is None:
+                return 0.0
+            r, g, b = region.convert("RGB").split()
+            from PIL import ImageStat
+
+            return float(ImageStat.Stat(b).mean[0] - ImageStat.Stat(r).mean[0])
+        except Exception:  # noqa: BLE001
+            return 0.0
 
     @staticmethod
     def strong_ratio(a, b, threshold: int = 40) -> float:
@@ -131,7 +148,7 @@ class ScreenCapture:
 
             if a is None or b is None or a.size != b.size:
                 return 0.0
-            hist = ImageChops.difference(a, b).histogram()
+            hist = ImageChops.difference(a.convert("L"), b.convert("L")).histogram()
             total = max(1, a.size[0] * a.size[1])
             return sum(hist[threshold:]) / total
         except Exception:  # noqa: BLE001
@@ -145,7 +162,7 @@ class ScreenCapture:
 
             if a is None or b is None or a.size != b.size:
                 return 0.0
-            diff = ImageChops.difference(a, b)
+            diff = ImageChops.difference(a.convert("L"), b.convert("L"))
             return float(ImageStat.Stat(diff).mean[0])
         except Exception:  # noqa: BLE001
             return 0.0

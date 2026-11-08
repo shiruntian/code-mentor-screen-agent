@@ -107,7 +107,7 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 - {"type":"sequence","actions":[{"type":"type","text":"notepad"},{"type":"key","key":"enter"}]}
 - {"type":"focus","title":"章节测验"}  按窗口标题/进程名直接激活某个窗口（切窗口首选，比 alt+tab 可靠）
 - {"type":"knowledge","query":"市场营销 4P"}  查本地知识库（导入过课件/题库才有料），结果会回到下一帧的提示里
-- {"type":"web_search","query":"营销 4P 理论 产品 价格 渠道 促销"}  联网搜索（12 秒超时，最多 4 条结果）
+- {"type":"web_search","query":"营销 4P 理论 产品 价格 渠道 促销"}  联网搜索（最多 4 条结果；一轮最多 4 次，同一查询不重复搜）
 - {"type":"web_open","url":"https://…"}  打开某条结果读正文（想细看再用）
 其它：{"type":"wait","seconds":1}  {"type":"done"}
 
@@ -227,9 +227,12 @@ Windows 会直接把控件的名字和矩形交出来，点击就变成"取矩�
 4. 选项读不清（字号小、被遮挡）→ 先 `{"type":"zoom",...}` 放大再读；还不行就 `ask` 问用户，
    绝不允许"看不清就随便选"或"看不清就跳过"。
 5. 拿不准答案时按这个顺序找依据：① `{"type":"knowledge","query":"题干关键词"}` 查本地知识库（导入过课件才有料）
-   → ② `{"type":"web_search","query":"题干里的关键词"}` 联网搜（最多 4 条，看摘要够判断就行；
-   想细看某条再 `{"type":"web_open","url":"..."}`）→ ③ 还不行才 `ask` 让用户给答案。
-   **绝不瞎猜**：`ask` 永远比猜错便宜，而且用户就在电脑前。
+   → ② `{"type":"web_search","query":"题干关键词"}` 联网搜 → ③ 还不行才 `ask` 让用户给答案。
+   - **联网不是必做步骤**：这类营销/管理理论的题目，先按你自己的知识作答，比搜半天更准。
+     一轮最多联网 4 次，**同一个查询不要搜第二遍**（系统会拒绝并告诉你第几步搜过）。
+   - 搜索结果里没有题干关键词（比如问“4D理论”却返回“智能”词条）= 这条搜索没用，
+     **立刻改用你自己的知识作答**，不要换个说法继续搜。
+   - 真正需要联网的是"某个具体名词的定义/某个平台的按钮在哪"这类，不是理论题。
 6. 多选题少选也算错：勾完每一个你确定的选项，提交前复查可选数量（题干写"多选"通常 2~4 个）。
 7. 提交后如果结果页出现红叉 / 低分，**不要急着往下翻**：先记下哪几题错了，
    并 `{"type":"ask",...}` 说明情况，让用户决定要不要重做（很多平台不允许重考）。
@@ -392,7 +395,47 @@ def parse_action_json(raw: str) -> dict[str, Any]:
                 return data
         except json.JSONDecodeError:
             pass
+
+    # 输出被 max_tokens 截断时 JSON 不完整：把动作字段捞回来，别整段作废
+    salvaged = _salvage_action(text)
+    if salvaged:
+        thought = ""
+        tm = re.search(r'"thought"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        if tm:
+            thought = tm.group(1).replace("\\n", " ")[:300]
+        return {"thought": thought or "（输出被截断，已从片段里恢复动作）", "action": salvaged}
+
     return {"thought": text[:200] or "模型未返回有效动作", "action": {"type": "wait", "seconds": 1}}
+
+
+def _salvage_action(text: str) -> dict[str, Any] | None:
+    """从不完整/被截断的输出里尽量捞出一个可执行的动作。"""
+    m = re.search(r'"type"\s*:\s*"([a-z_]+)"?', text)
+    if not m:
+        return None
+    kind = m.group(1)
+    if kind in ("done",):
+        return {"type": "done"}
+    act: dict[str, Any] = {"type": kind}
+    tail = text[m.end():]
+    for key in ("x", "y", "to_x", "to_y", "seconds", "amount", "line", "index"):
+        km = re.search(rf'"{key}"\s*:\s*(-?\d+(?:\.\d+)?)', tail)
+        if km:
+            value = float(km.group(1))
+            act[key] = int(value) if value.is_integer() and key != "seconds" else value
+    km = re.search(r'"key"\s*:\s*"([A-Za-z0-9_]+)"?', tail)
+    if km:
+        act["key"] = km.group(1)
+    km = re.search(r'"keys"\s*:\s*\[([^\]]*)\]', tail)
+    if km:
+        act["keys"] = re.findall(r'"([^"]+)"', km.group(1))
+    km = re.search(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', tail)
+    if km:
+        act["text"] = km.group(1)
+    # 没有坐标的点击不可能执行，宁可不捞
+    if kind in ("click", "double_click", "right_click") and ("x" not in act or "y" not in act):
+        return None
+    return act
 
 
 @dataclass
@@ -438,6 +481,13 @@ class Runner:
     same_frame_streak: int = 0                        # 连续「画面与上一帧完全一样」的次数
     click_history: list[dict[str, Any]] = field(default_factory=list)  # 最近点过哪里（防重复勾选）
     console_tucked: bool = False                      # 是否已经替用户最小化过控制台
+    web_calls: int = 0                                # 本轮联网查了几次
+    idle_streak: int = 0                              # 连续几步都在取证/等待，没做真动作
+    must_act: str = ""                                # 非空时提示词里会强推"立刻动手"
+    measured: dict[str, bool] = field(default_factory=dict)  # 坐标 → 勾选状态（点过才知道）
+    web_queries: dict[str, int] = field(default_factory=dict)  # 查过的查询词 → 第几步
+    kb_calls: int = 0                                 # 本轮查知识库几次
+    kb_queries: dict[str, int] = field(default_factory=dict)
     current_image: Any = None                         # 最近一帧的截图对象（局部比对用）
     last_cheap_action: bool = False                   # 上一步是 wait/key/scroll 这类便宜动作
     recent_fps: list[str] = field(default_factory=list)                # 最近动作指纹（防死循环）
@@ -569,6 +619,10 @@ class ScreenController:
 
         IME_GUARD.enabled = bool(settings.screen_ime_guard)
         runner = Runner(session_id=session_id)
+        # 答题类任务开局先放大左半屏：小方框在整屏图里只有十几个像素，
+        # 模型认不出「已选/未选」，一上来盲点会把已经选中的又取消掉
+        if any(w in str(row.goal or "") for w in ("测验", "答题", "做题", "考试")):
+            runner.zoom = {"x0": 0.0, "y0": 100.0, "x1": 460.0, "y1": 1000.0}
         # 接着上次的回答继续：模型提问会结束循环，回答后是新 Runner，不接上就白答了
         runner.answers = list(self._answers.get(session_id, []))
         runner.asked = list(self._asked.get(session_id, []))
@@ -857,6 +911,43 @@ class ScreenController:
                 except ActionError as exc:
                     action = {"type": "wait", "seconds": 1.0}
                     thought = f"{thought}（动作不合法：{exc}，改为等待）".strip()
+                except Exception as exc:  # noqa: BLE001
+                    # 模型可能把字段写成数组/对象，别让它把整轮演示带崩
+                    action = {"type": "wait", "seconds": 1.0}
+                    thought = f"{thought}（动作解析失败：{exc}，改为等待）".strip()
+                    logger.warning("动作解析失败，改为等待: %r", raw_action)
+
+                # 3.7) 防手抖：同一位置刚点过就别再点了——单选/多选框再点一次就是取消。
+                #      直接把这一下改成"放大那块区域"，既不吃亏又能让模型看清勾选状态。
+                repeat_hit = self._repeat_click_gap(
+                    runner, action, state["current_step"] + 1
+                )
+                if repeat_hit is not None and action.get("type") in ("click", "double_click"):
+                    px = float(action.get("x") or 0)
+                    py_ = float(action.get("y") or 0)
+                    action = {
+                        "type": "zoom",
+                        "region": {
+                            "x0": max(0.0, px - 90),
+                            "y0": max(0.0, py_ - 60),
+                            "x1": min(1000.0, px + 90),
+                            "y1": min(1000.0, py_ + 60),
+                        },
+                    }
+                    thought = (
+                        f"{thought}（{repeat_hit} 步前刚点过这里，改为放大确认勾选状态）"
+                    ).strip()
+                    runner.frame_context.append(
+                        f"【系统】你 {repeat_hit} 步前刚点过这个位置。如果那是选项框，再点就是取消选中——"
+                        "已经帮你放大了，先看清它现在是勾上还是没勾，再决定点哪儿"
+                    )
+
+                # 3.75) 答题过程中不许刷新页面：ctrl+l / ctrl+r / f5 会把已勾的答案全清掉
+                blocked_reload = self._blocked_reload(state, action)
+                if blocked_reload:
+                    action = {"type": "wait", "seconds": 0.6}
+                    thought = f"{thought}（{blocked_reload}）".strip()
+                    runner.frame_context.append(f"【系统】{blocked_reload}")
 
                 # edit_line：套用这个编辑器学到的整行选中手法
                 if action.get("type") == "edit_line" and action.get("variant", "auto") == "auto":
@@ -955,7 +1046,9 @@ class ScreenController:
                 if action["type"] == "knowledge":
                     # 答题前先查本地知识库：结果回到下一帧的提示词里，不用额外截图
                     query = str(action.get("query") or "")
-                    observation = await self._run_knowledge(query)
+                    observation = await self._run_knowledge_cached(
+                        runner, query, state["current_step"] + 1
+                    )
                     runner.frame_context.append(f"【查知识库·{query[:24]}】{observation}")
                     await bus.publish(
                         channel,
@@ -969,7 +1062,9 @@ class ScreenController:
 
                 if action["type"] in ("web_search", "web_open"):
                     # 知识库没有的东西（课程外名词、常识）才联网，结果同样回到提示词里
-                    observation = await self._run_web(action)
+                    observation = await self._run_web_cached(
+                        runner, action, state["current_step"] + 1
+                    )
                     label = action.get("query") or action.get("url") or ""
                     runner.frame_context.append(f"【联网·{str(label)[:24]}】{observation}")
                     await bus.publish(
@@ -1016,7 +1111,7 @@ class ScreenController:
                     if key in runner.failed:
                         block_reason = f"「{runner.failed[key]}」此前已失败"
                     elif signature in runner.signatures:
-                        block_reason = f"「{describe_action(action)}」刚才做过但没有效果"
+                        block_reason = f"「{describe_action(action)}」这一步刚做过，重复做不会改变结果"
                         runner.failed[key] = describe_action(action)
                         await record_lesson(
                             scope=runner.app_scope,
@@ -1135,6 +1230,18 @@ class ScreenController:
                         "scope": runner.app_scope,
                         "step": step_idx,
                     }
+                # 只有点击/输入才算“真动作”；取证、联网、等待、翻页都算空转
+                if action["type"] in ("click", "double_click", "right_click", "drag"):
+                    runner.idle_streak = 0
+                    runner.must_act = ""
+                elif action["type"] in ("wait", "web_search", "web_open", "knowledge",
+                                        "zoom", "key", "hotkey", "scroll", "page", "probe"):
+                    runner.idle_streak += 1
+                    if runner.idle_streak >= 3 and not runner.must_act:
+                        runner.must_act = (
+                            f"你已经连续 {runner.idle_streak} 步在取证/搜索/等待，界面没有任何变化。"
+                            "现在必须做一个真实动作：直接点选项或按钮"
+                        )
                 runner.last_cheap_action = action["type"] in (
                     "wait", "key", "hotkey", "scroll", "page", "type",
                 )
@@ -1513,10 +1620,55 @@ class ScreenController:
         after = self.capture.crop_region(image, region)
         diff = self.capture.mean_diff(before, after)
         strong = self.capture.strong_ratio(before, after)
+        # 顺带判断"变蓝了还是变灰了"：这就是勾选/取消的直接证据
+        try:
+            delta_blue = self.capture.blue_score(after) - self.capture.blue_score(before)
+            pend["blue_delta"] = delta_blue
+        except Exception:  # noqa: BLE001
+            pass
         if strong >= self.CLICK_REGION_STRONG or diff >= self.CLICK_REGION_DIFF:
             logger.info("局部判定生效：明显变化 %.2f%%，平均差 %.2f", strong * 100, diff)
             return True
         return False
+
+    def _repeat_click_gap(
+        self, runner: "Runner", action: dict[str, Any], step_idx: int
+    ) -> int | None:
+        """这个位置几步前刚点过？没点过返回 None。"""
+        if action.get("x") is None or action.get("y") is None:
+            return None
+        try:
+            x = float(action["x"])
+            y = float(action["y"])
+        except (TypeError, ValueError):
+            return None
+        for item in reversed(runner.click_history[-4:]):
+            near = (
+                abs(item["x"] - x) <= self.REPEAT_CLICK_RADIUS
+                and abs(item["y"] - y) <= self.REPEAT_CLICK_RADIUS
+            )
+            if not near:
+                continue
+            gap = int(step_idx) - int(item["step"])
+            if 0 < gap <= 3:
+                return gap
+        return None
+
+    # 答题过程中会丢答案的快捷键
+    RELOAD_KEYS = ({"ctrl", "l"}, {"ctrl", "r"}, {"f5"})
+    QUIZ_WORDS = ("测验", "答题", "做题", "提交", "考试")
+
+    def _blocked_reload(self, state: dict[str, Any], action: dict[str, Any]) -> str:
+        """答题时按 Ctrl+L / Ctrl+R / F5 会把已勾的答案清空，直接拦掉。"""
+        goal = str(state.get("goal") or "")
+        if not any(w in goal for w in self.QUIZ_WORDS):
+            return ""
+        keys = {str(k).lower() for k in (action.get("keys") or [])}
+        if action.get("type") == "hotkey" and tuple(sorted(keys)) in {tuple(sorted(k)) for k in self.RELOAD_KEYS}:
+            return "答题过程中刷新/跳转会清掉已勾选的答案，这个快捷键已被拦下"
+        if action.get("type") == "key" and str(action.get("key")).lower() == "f5":
+            return "答题过程中刷新会清掉已勾选的答案，已被拦下"
+        return ""
 
     # 同一位置重复点击的判定半径（0~1000 坐标里的 ±25，约等于一个选项框的宽度）
     REPEAT_CLICK_RADIUS = 25.0
@@ -1607,6 +1759,28 @@ class ScreenController:
         await asyncio.sleep(0.45)
         return "（系统：演示控制台挡住了目标窗口，已自动最小化它，继续操作）"
 
+    # 知识库一轮最多查几次（课件没导入时，反复查只会烧步数）
+    MAX_KB_CALLS = 2
+
+    async def _run_knowledge_cached(
+        self, runner: "Runner", query: str, step_idx: int = 0
+    ) -> str:
+        key = self._norm_query(query)
+        if key and key in runner.kb_queries:
+            runner.idle_streak += 1
+            return (
+                f"这个查询第 {runner.kb_queries[key]} 步查过了，知识库里没有相关内容。"
+                "直接用你自己的知识作答，去点选项"
+            )
+        if runner.kb_calls >= self.MAX_KB_CALLS:
+            runner.idle_streak += 1
+            runner.must_act = "知识库这条路走不通了：直接用你的知识作答，现在就点选项"
+            return "本轮知识库查询次数已用完。不要再查，直接按你的知识作答并点选项"
+        runner.kb_calls += 1
+        if key:
+            runner.kb_queries[key] = int(step_idx) or runner.kb_calls
+        return await self._run_knowledge(query)
+
     async def _run_knowledge(self, query: str) -> str:
         """查本地知识库（答题/查资料用）。结果作为取证回到下一帧的提示词里。"""
         query = (query or "").strip()
@@ -1629,6 +1803,51 @@ class ScreenController:
         except Exception as exc:  # noqa: BLE001
             logger.warning("知识库检索失败: %s", exc)
             return f"知识库检索失败（{exc}），用自己的知识判断"
+
+    # 一轮演示里最多联网几次（再多就是在拿步数兜圈子）
+    MAX_WEB_CALLS = 4
+
+    @staticmethod
+    def _norm_query(text: str) -> str:
+        return re.sub(r"[\s\W_]+", "", (text or "").lower())
+
+    async def _run_web_cached(
+        self, runner: "Runner", action: dict[str, Any], step_idx: int = 0
+    ) -> str:
+        """联网前先看：查过没有、次数还剩几次。
+
+        实测问题：模型对着同一题连搜 8 次同一个查询，每次都是同一堆无关结果，
+        60 步的预算被它烧掉 8 步，一个选项都没点。
+        """
+        if action.get("type") != "web_search":
+            return await self._run_web(action)
+
+        query = str(action.get("query") or "")
+        key = self._norm_query(query)
+        if len(key) < 4:
+            return f"「{query}」太短了，搜不出有用的东西；把题干里的关键词拼进去再搜"
+
+        if key in runner.web_queries:
+            step = runner.web_queries[key]
+            runner.idle_streak += 2
+            runner.must_act = (
+                "同一个查询你已经搜过了，结果里没有这道题的内容。"
+                "不要再搜了：按你的知识直接作答，并且现在就去点选项"
+            )
+            return (
+                f"这个查询第 {step} 步已经搜过了（结果在【本帧查到的外部信息】里）。"
+                "不要重复搜同一句：直接用你的知识作答，并去点选项"
+            )
+
+        if runner.web_calls >= self.MAX_WEB_CALLS:
+            return (
+                f"本轮已经联网 {runner.web_calls} 次，到上限了。"
+                "请直接用你的知识作答，或者 ask 让用户确认——别再搜了"
+            )
+
+        runner.web_calls += 1
+        runner.web_queries[key] = int(step_idx) or (len(runner.web_queries) + 1)
+        return await self._run_web(action)
 
     async def _run_web(self, action: dict[str, Any]) -> str:
         """联网搜索 / 读网页（答题时知识库没有的东西靠它）。"""
@@ -1840,6 +2059,26 @@ class ScreenController:
             runner.force_switch = False
             runner.zoom = None
             runner.last_click = None
+            # 勾选反馈：告诉模型这一下是"勾上"还是"取消"，省得它靠 20 像素的小方框猜
+            delta_blue = float(pend.get("blue_delta") or 0.0)
+            if action.get("type") in ("click", "double_click") and abs(delta_blue) >= 8:
+                try:
+                    key = f"{int(round(float(action.get('x')) / 10) * 10)},"                           f"{int(round(float(action.get('y')) / 10) * 10)}"
+                    runner.measured[key] = delta_blue > 0
+                    runner.measured = dict(list(runner.measured.items())[-16:])
+                except (TypeError, ValueError):
+                    pass
+                arrow = (
+                    "变成蓝色 → 这个选项现在是**已选中**"
+                    if delta_blue > 0
+                    else "变回灰白 → 这个选项现在是**未选中**（如果本来想选中它，说明它之前就是选中的，再点一次即可恢复）"
+                )
+                runner.frame_context.append(f"【勾选反馈】刚才点的那块{arrow}")
+                await bus.publish(
+                    channel,
+                    {"type": "notice", "level": "info",
+                     "message": ("勾选反馈：" + ("已选中" if delta_blue > 0 else "已取消"))},
+                )
             try:
                 await record_lesson(
                     scope=pend.get("scope") or GLOBAL_SCOPE,
@@ -2125,6 +2364,21 @@ class ScreenController:
                 + "\n".join(runner.frame_context[-6:])
                 + "\n（这些是系统真实查到的：控件树 / 知识库 / 联网结果，优先采信它们，别凭空猜）\n"
                 if runner.frame_context
+                else ""
+            )
+            + (
+                "【你已确认的勾选状态】"
+                + "；".join(
+                    f"({k})={'已选中' if v else '未选中'}" for k, v in runner.measured.items()
+                )
+                + "\n（这些是你亲手点出来、由系统核对过的，别再重复点已选中的）\n"
+                if runner.measured
+                else ""
+            )
+            + (
+                "【必须立刻动手】" + runner.must_act + "\n"
+                "禁止再 wait / 取证 / 搜索；你的下一个动作必须是 click。\n"
+                if runner.must_act
                 else ""
             )
             + "截图上方与左侧是 0~1000 的坐标刻度，点击请按刻度估位。现在输出下一步动作 JSON。"
