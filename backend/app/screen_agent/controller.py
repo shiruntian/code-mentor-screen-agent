@@ -434,6 +434,7 @@ class Runner:
     same_frame_streak: int = 0                        # 连续「画面与上一帧完全一样」的次数
     click_history: list[dict[str, Any]] = field(default_factory=list)  # 最近点过哪里（防重复勾选）
     console_tucked: bool = False                      # 是否已经替用户最小化过控制台
+    current_image: Any = None                         # 最近一帧的截图对象（局部比对用）
     last_cheap_action: bool = False                   # 上一步是 wait/key/scroll 这类便宜动作
     recent_fps: list[str] = field(default_factory=list)                # 最近动作指纹（防死循环）
     last_think_at: float = 0.0                        # 上次调用模型的时间
@@ -748,6 +749,7 @@ class ScreenController:
                     runner.same_frame_streak = runner.same_frame_streak + 1 if same_frame else 0
                     runner.last_sig = sig or runner.last_sig
                     runner.last_shot_at = time.perf_counter()
+                    runner.current_image = shot["image"]   # 供局部比对（勾选框翻转）
                     runner.frame_context = []          # 新的一帧：清空上一帧的取证记录
                 except Exception as exc:  # noqa: BLE001
                     await self._fail(session_id, f"截图失败：{exc}")
@@ -1115,8 +1117,16 @@ class ScreenController:
                 # 交给下一帧判定成败（type/wait 这种不改变界面的动作不判）
                 runner.last_action_at = time.perf_counter()
                 if action["type"] not in NO_VERDICT_KINDS:
+                    # 点击类动作额外记住落点附近那一小块的图像：
+                    # 单个勾选框翻转只占屏幕 0.16%，整屏指纹看不见，但这一小块能看见
+                    region = self._click_region(action)
+                    region_img = (
+                        self.capture.crop_region(shot["image"], region) if region else None
+                    )
                     runner.pending = {
                         "action": action,
+                        "region": region,
+                        "region_img": region_img,
                         "key": key,
                         "scope": runner.app_scope,
                         "step": step_idx,
@@ -1436,6 +1446,45 @@ class ScreenController:
         await self.resume(session_id)
         return {"ok": True, "session_id": session_id, "answer": text}
 
+    # 点击落点周围取多大一块来判断"这一下有没有生效"（0~1000 归一化坐标 ±40）
+    # 太大就把勾选框稀释掉了：pad=60 时 20×20 翻转平均差只有 2.6，pad=40 时有 6.0
+    CLICK_REGION_PAD = 40.0
+    # 明显变化像素占比（实测：12×12 勾选框翻转 1.24%，光标挪 3px 0.94%，静止 0%）
+    CLICK_REGION_STRONG = 0.008
+    # 平均像素差兜底（20×20 翻转 6.0）
+    CLICK_REGION_DIFF = 3.0
+
+    def _click_region(self, action: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        """点击落点附近要盯的一小块（归一化坐标）。非点击动作返回 None。"""
+        if action.get("type") not in ("click", "double_click", "right_click"):
+            return None
+        try:
+            x = float(action["x"])
+            y = float(action["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        pad = self.CLICK_REGION_PAD
+        return (
+            max(0.0, x - pad),
+            max(0.0, y - pad),
+            min(1000.0, x + pad),
+            min(1000.0, y + pad),
+        )
+
+    def _region_changed(self, pend: dict[str, Any], image) -> bool:  # noqa: ANN001
+        """刚才点的那一小块变了吗（勾选框翻转、按钮按下变色都在这儿）。"""
+        region = pend.get("region")
+        before = pend.get("region_img")
+        if not region or before is None or image is None:
+            return False
+        after = self.capture.crop_region(image, region)
+        diff = self.capture.mean_diff(before, after)
+        strong = self.capture.strong_ratio(before, after)
+        if strong >= self.CLICK_REGION_STRONG or diff >= self.CLICK_REGION_DIFF:
+            logger.info("局部判定生效：明显变化 %.2f%%，平均差 %.2f", strong * 100, diff)
+            return True
+        return False
+
     # 同一位置重复点击的判定半径（0~1000 坐标里的 ±25，约等于一个选项框的宽度）
     REPEAT_CLICK_RADIUS = 25.0
 
@@ -1722,6 +1771,9 @@ class ScreenController:
         action = pend["action"]
         desc = describe_action(action)
         changed = not same_frame
+        if not changed:
+            # 整屏看不出变化？再看点击落点那一小块（勾选框/单选钮的翻转就在这儿）
+            changed = self._region_changed(pend, runner.current_image)
 
         # 宽限期复查：界面可能只是还没刷新完
         if not changed:

@@ -104,6 +104,53 @@ class ScreenCapture:
             return b""
 
     @staticmethod
+    def crop_region(image, box: tuple[float, float, float, float]):
+        """按 0~1000 归一化坐标裁一块出来（用于判断"我刚点的这一小块有没有变"）。
+
+        整屏 64×40 指纹看不到单个勾选框的翻转（约占屏幕 0.01%），
+        所以点击类动作要额外看它落点附近那一小块。
+        """
+        try:
+            w, h = image.size
+            x0 = max(0, min(w - 2, int(box[0] / 1000 * w)))
+            y0 = max(0, min(h - 2, int(box[1] / 1000 * h)))
+            x1 = max(x0 + 2, min(w, int(box[2] / 1000 * w)))
+            y1 = max(y0 + 2, min(h, int(box[3] / 1000 * h)))
+            return image.crop((x0, y0, x1, y1)).convert("L")
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def strong_ratio(a, b, threshold: int = 40) -> float:
+        """两块图里「明显变了」的像素占比（|差| > threshold）。
+
+        比平均差灵敏：小方框翻转只涉及几百个像素，平均下来会被稀释。
+        """
+        try:
+            from PIL import ImageChops
+
+            if a is None or b is None or a.size != b.size:
+                return 0.0
+            hist = ImageChops.difference(a, b).histogram()
+            total = max(1, a.size[0] * a.size[1])
+            return sum(hist[threshold:]) / total
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @staticmethod
+    def mean_diff(a, b) -> float:
+        """两块图之间的平均像素差（0~255）。勾选框翻转通常 > 20，静止时约 0~2。"""
+        try:
+            from PIL import ImageChops, ImageStat
+
+            if a is None or b is None or a.size != b.size:
+                return 0.0
+            diff = ImageChops.difference(a, b)
+            return float(ImageStat.Stat(diff).mean[0])
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @staticmethod
     def diff_ratio(a: bytes, b: bytes, threshold: int = 6) -> float:
         """两张指纹里「变化明显」的格子占比。光标闪烁只有 1~2 格，会被忽略。"""
         if not a or not b or len(a) != len(b):
