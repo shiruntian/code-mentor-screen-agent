@@ -1587,6 +1587,14 @@ class ScreenController:
                 session_id,
                 "--question",
                 question,
+                "--theme",
+                str(getattr(settings, "screen_ask_theme", "dark") or "dark"),
+                "--opacity",
+                str(float(getattr(settings, "screen_ask_opacity", 0.94) or 0.94)),
+                "--tint",
+                str(int(getattr(settings, "screen_ask_tint", 0) or 0)),
+                "--accent",
+                str(getattr(settings, "screen_ask_accent", "") or "#6366f1"),
             ]
             for opt in options[:4]:
                 argv.extend(["--options", str(opt)])

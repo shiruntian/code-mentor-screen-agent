@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     screen_ask_dialog: bool = True
     # 浏览器开了调试端口时，直接读网页 DOM（比截图识别可靠得多）
     screen_dom_reader: bool = True
+    # 演示提问窗的外观（设置 → 外观 → 演示问答弹窗）
+    screen_ask_opacity: float = 0.94          # 1.0 = 不透明
+    screen_ask_theme: str = "dark"            # dark / light
+    screen_ask_tint: int = 0                  # 负值更暗、正值更亮（-30~30）
+    screen_ask_accent: str = ""               # 空 = 用默认靛蓝 #6366f1
 
     # ---------- 记忆 ----------
     short_term_window: int = 12  # 送给模型的最大消息条数

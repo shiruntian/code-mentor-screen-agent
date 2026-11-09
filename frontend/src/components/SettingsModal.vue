@@ -23,6 +23,28 @@ const ollamaModels = ref<string[]>([])
 const scanning = ref(false)
 
 const rt = () => app.settings?.runtime || {}
+// 演示问答弹窗的外观（存后端 settings，拉起 tkinter 窗口时生效）
+const askLook = reactive({
+  screen_ask_theme: rt().screen_ask_theme ?? 'dark',
+  screen_ask_opacity: rt().screen_ask_opacity ?? 0.94,
+  screen_ask_tint: rt().screen_ask_tint ?? 0,
+  screen_ask_accent: rt().screen_ask_accent ?? '',
+})
+const askSaving = ref(false)
+
+async function saveAskLook() {
+  askSaving.value = true
+  try {
+    const res = await api.put<any>('/api/settings', { ...askLook })
+    Object.assign(runtime, res?.runtime || {})
+    app.toast('success', '问答弹窗外观已保存')
+  } catch (e: any) {
+    app.toast('error', e?.message || '保存失败')
+  } finally {
+    askSaving.value = false
+  }
+}
+
 const runtime = reactive({
   agent_max_iterations: rt().agent_max_iterations ?? 6,
   screen_interval_ms: rt().screen_interval_ms ?? 5000,
