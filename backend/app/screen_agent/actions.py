@@ -233,6 +233,17 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
         if len(keys) > 1 or kind == "hotkey":
             return {"type": "hotkey", "keys": keys}
         return {"type": "key", "key": keys[0]}
+    if kind in ("new_tab", "open_tab", "tab", "browser"):
+        # 新开标签页：绝不覆盖当前页（演示控制台就在当前页，盖住就看不见了）
+        target = action.get("url") or action.get("target") or action.get("query") or ""
+        text = str(target).strip()
+        if text and not text.startswith(("http://", "https://")):
+            # 给的是搜索词而不是网址：拼成必应搜索
+            from urllib.parse import quote
+
+            text = "https://www.bing.com/search?q=" + quote(text)
+        return {"type": "new_tab", "url": text}
+
     if kind in ("scroll", "wheel"):
         direction = str(action.get("direction") or action.get("dir") or "").strip().lower()
         raw = action.get("amount", action.get("value", action.get("clicks")))
@@ -802,6 +813,9 @@ def _describe(action: dict[str, Any]) -> str:
     if kind == "zoom":
         r = action.get("region") or {}
         return f"放大观察 x{r.get('x0',0):.0f}-{r.get('x1',1000):.0f} / y{r.get('y0',0):.0f}-{r.get('y1',1000):.0f}"
+
+    if kind == "new_tab":
+        return "新开标签页" + (f"：{str(action.get('url') or '')[:60]}" if action.get("url") else "")
 
     if kind == "scroll":
         amount = int(action.get("amount") or 0)
@@ -1442,6 +1456,19 @@ def execute(action: dict[str, Any], screen_size: tuple[int, int]) -> str:
         else:
             pyautogui.hotkey(*normalized["keys"])
         return _describe(normalized)
+
+    if kind == "new_tab":
+        # Ctrl+T 新开一页再输地址：当前页（演示控制台）原封不动留在原标签
+        pyautogui.hotkey("ctrl", "t")
+        time.sleep(0.5)
+        url = str(normalized.get("url") or "").strip()
+        if url:
+            _type_text(url, False)
+            time.sleep(0.25)
+            pyautogui.press("enter")
+            time.sleep(0.7)
+            return f"已新开标签页并打开：{url[:60]}"
+        return "已新开空白标签页（控制台仍留在原来的标签页）"
 
     if kind == "scroll":
         amount = int(normalized["amount"])

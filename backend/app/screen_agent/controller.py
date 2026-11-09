@@ -108,7 +108,8 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 - {"type":"sequence","actions":[{"type":"type","text":"notepad"},{"type":"key","key":"enter"}]}
 - {"type":"focus","title":"章节测验"}  按窗口标题/进程名直接激活某个窗口（切窗口首选，比 alt+tab 可靠）
 - {"type":"knowledge","query":"市场营销 4P"}  查本地知识库（导入过课件/题库才有料），结果会回到下一帧的提示里
-- {"type":"web_search","query":"营销 4P 理论 产品 价格 渠道 促销"}  联网搜索（最多 4 条结果；一轮最多 4 次，同一查询不重复搜）
+- {"type":"web_search","query":"营销 4P 理论 产品 价格 渠道 促销"}  联网搜索（**后台查，不碰浏览器**；最多 4 条结果，一轮最多 4 次）
+- {"type":"new_tab","url":"https://…"} 或 {"type":"new_tab","query":"搜索词"}  **新开标签页**再打开/搜索（不覆盖当前页）
 - {"type":"web_open","url":"https://…"}  打开某条结果读正文（想细看再用）
 其它：{"type":"wait","seconds":1}  {"type":"done"}
 
@@ -135,6 +136,20 @@ SYSTEM_PROMPT = """你是「CodeMentor 屏幕操作智能体」，看截图真�
 4. **在资源管理器里上下找文件** → 直接输入文件名首字母，或 ctrl+l 输完整路径回车
 5. **横向滚动** → `scroll` 配合 shift
 键盘翻页前要让页面拿到焦点：先点一下内容区空白处；滚动条本身很窄，**不要用 drag 去拖它**。
+
+## 浏览器：绝不覆盖当前标签页
+
+用户是**在浏览器里看着演示控制台**的。一旦你在当前标签页的地址栏里改内容（Ctrl+L 打字、
+点当前页搜索框回车），控制台就被顶掉了，用户眼前一黑，还以为程序崩了。
+
+按这个顺序来：
+
+1. **只是查资料** → `{"type":"web_search","query":"…"}`：后台搜，结果下一帧回到提示里，完全不用动浏览器；想看正文再 `{"type":"web_open","url":"…"}`
+2. **必须打开网页看效果** → `{"type":"new_tab","url":"https://…"}` 或 `{"type":"new_tab","query":"搜索词"}`：新开一页，原标签页（控制台）还在
+3. 用完 `ctrl+w` 关掉新标签页，回到控制台
+4. 绝对不要：在当前标签页 `ctrl+l` 后输地址、点当前页搜索框、`ctrl+r` / F5
+
+> 系统兜底：当前台是控制台时按 `ctrl+l`，会自动改成"新开标签页"。
 
 ## 控件树（比看截图准得多，优先用）
 Windows 会直接把控件的名字和矩形交出来，点击就变成"取矩形中心"，不用认字也不用估格：
@@ -995,6 +1010,10 @@ class ScreenController:
 
                 # 3.75) 答题过程中不许刷新页面：ctrl+l / ctrl+r / f5 会把已勾的答案全清掉
                 blocked_reload = self._blocked_reload(state, action)
+                guarded_tab = await self._guard_own_tab(action, runner)
+                if guarded_tab is not None:
+                    action = guarded_tab
+
                 if blocked_reload:
                     action = {"type": "wait", "seconds": 0.6}
                     thought = f"{thought}（{blocked_reload}）".strip()
@@ -1872,6 +1891,31 @@ class ScreenController:
     def _is_own_window(self, title: str) -> bool:
         t = (title or "").lower()
         return any(k.lower() in t for k in self.OWN_UI_TITLES)
+
+    async def _guard_own_tab(
+        self, action: dict[str, Any], runner: "Runner"
+    ) -> dict[str, Any] | None:
+        """当前台是演示控制台时，别在当前标签页改地址栏——那会把控制台盖掉。"""
+        if action.get("type") not in ("hotkey", "key"):
+            return None
+        raw = action.get("keys") or [action.get("key")]
+        keys = tuple(str(k).lower() for k in raw if k)
+        if keys not in (("ctrl", "l"), ("alt", "d")):
+            return None
+        if runner.quiz_mode:  # 答题时 ctrl+l 已被 _blocked_reload 拦掉
+            return None
+        try:
+            from app.screen_agent.actions import foreground_window
+
+            info = await asyncio.to_thread(foreground_window)
+        except Exception:  # noqa: BLE001
+            return None
+        if not self._is_own_window(str(info.get("title") or "")):
+            return None
+        runner.frame_context.append(
+            "【系统】你要在当前标签页改地址栏，已改成新开标签页，避免把演示控制台盖掉。"
+        )
+        return {"type": "new_tab", "url": ""}
 
     async def _make_room(self, runner: "Runner") -> str:
         """前台被自家控制台占着时先让开：点它等于白点，画面也不会动。
