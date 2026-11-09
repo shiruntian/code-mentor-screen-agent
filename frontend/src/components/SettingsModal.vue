@@ -25,13 +25,27 @@ const scanning = ref(false)
 const rt = () => app.settings?.runtime || {}
 // 演示问答弹窗的外观（存后端 settings，拉起 tkinter 窗口时生效）
 const askLook = reactive({
-  screen_ask_follow_ui: rt().screen_ask_follow_ui ?? true,
-  screen_ask_theme: rt().screen_ask_theme ?? 'dark',
-  screen_ask_opacity: rt().screen_ask_opacity ?? 0.94,
-  screen_ask_tint: rt().screen_ask_tint ?? 0,
-  screen_ask_accent: rt().screen_ask_accent ?? '',
-  screen_ask_font: rt().screen_ask_font ?? '',
+  screen_ask_follow_ui: true,
+  screen_ask_theme: 'dark',
+  screen_ask_opacity: 0.94,
+  screen_ask_tint: 0,
+  screen_ask_accent: '',
+  screen_ask_font: '',
 })
+// 设置是异步加载的，必须等 app.settings 到了再填；否则一保存就把默认值写回后端
+watch(
+  () => app.settings?.runtime,
+  (rt: any) => {
+    if (!rt) return
+    askLook.screen_ask_follow_ui = rt.screen_ask_follow_ui ?? true
+    askLook.screen_ask_theme = rt.screen_ask_theme ?? 'dark'
+    askLook.screen_ask_opacity = rt.screen_ask_opacity ?? 0.94
+    askLook.screen_ask_tint = rt.screen_ask_tint ?? 0
+    askLook.screen_ask_accent = rt.screen_ask_accent ?? ''
+    askLook.screen_ask_font = rt.screen_ask_font ?? ''
+  },
+  { immediate: true, deep: true },
+)
 const fontFamilyKey = ref(readAppearance().font)
 const askSaving = ref(false)
 

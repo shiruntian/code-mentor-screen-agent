@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted, watch } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
 import ChatHeader from './components/ChatHeader.vue'
 import MessageList from './components/MessageList.vue'
@@ -53,6 +53,9 @@ onMounted(() => {
   app.boot()
   syncAskLook()
   window.addEventListener('cm-appearance', syncAskLook)
+  // 切换浅色/深色不会走 applyAppearance，必须单独盯 themeResolved，
+  // 否则后端一直停在上次的主题上（演示提问窗就还是黑的）
+  watch(() => ui.themeResolved, () => syncAskLook())
   window.addEventListener('dragover', guardFileDrop)
   window.addEventListener('drop', guardFileDrop)
 })
