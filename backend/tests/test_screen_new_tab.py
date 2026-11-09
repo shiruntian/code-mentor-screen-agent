@@ -105,4 +105,39 @@ async def test_guard_ignores_other_keys(monkeypatch):
 
     monkeypatch.setattr(A, "foreground_window", fake_fg)
     assert await ctl._guard_own_tab({"type": "hotkey", "keys": ["ctrl", "c"]}, runner) is None
-    assert await ctl._guard_own_tab({"type": "click", "x": 1, "y": 2}, runner) is None
+    # 页面中部的点击不受影响；顶部那条（y<90）算地址栏/标签栏，会被改写
+    assert await ctl._guard_own_tab({"type": "click", "x": 1, "y": 600}, runner) is None
+
+@pytest.mark.asyncio
+async def test_address_bar_click_becomes_new_tab(monkeypatch):
+    """模型常常是点一下地址栏而不是按 ctrl+l，这条也得拦。"""
+    ctl = ScreenController()
+    runner = Runner(session_id="j" * 32)
+
+    def fake_fg():
+        return {"title": "CodeMentor · 编程学习助手 - Microsoft Edge", "hwnd": 1}
+
+    monkeypatch.setattr(A, "foreground_window", fake_fg)
+    out = await ctl._guard_own_tab({"type": "click", "x": 500, "y": 60}, runner)
+    assert out == {"type": "new_tab", "url": ""}
+    assert any("地址栏" in c for c in runner.frame_context)
+
+
+@pytest.mark.asyncio
+async def test_click_in_page_body_is_not_redirected(monkeypatch):
+    ctl = ScreenController()
+    runner = Runner(session_id="k" * 32)
+
+    def fake_fg():
+        return {"title": "CodeMentor · 编程学习助手", "hwnd": 1}
+
+    monkeypatch.setattr(A, "foreground_window", fake_fg)
+    assert await ctl._guard_own_tab({"type": "click", "x": 500, "y": 600}, runner) is None
+
+
+def test_console_window_title_detection():
+    """控制台开在浏览器里时，窗口标题是页面标题，不是屏幕演示控制台。"""
+    ctl = ScreenController()
+    assert ctl._is_console_window("CodeMentor · 编程学习助手 - Microsoft Edge")
+    assert ctl._is_console_window("屏幕演示控制台")
+    assert not ctl._is_console_window("超星学习通 - Microsoft Edge")

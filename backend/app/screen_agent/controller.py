@@ -1887,6 +1887,16 @@ class ScreenController:
     # 自家界面的窗口标题特征：这些窗口永远不是演示目标
     # 只认自家的演示控制台；不要放 CodeMentor 之类，否则用户就是来演示这个应用时会被误伤
     OWN_UI_TITLES = ("屏幕演示控制台", "屏幕演示面板", "演示控制台", "屏幕演示 -")
+    # 控制台在浏览器里时，窗口标题是**页面标题**（前端 index.html 的 <title>）。
+    # 这组只给"地址栏护栏"用：小时候 _make_room 故意不认 CodeMentor，
+    # 免得用户就是来演示这个应用时被自动最小化。
+    CONSOLE_TITLES = ("codementor", "code mentor", "编程学习助手", "智能代码助手")
+
+    def _is_console_window(self, title: str) -> bool:
+        t = (title or "").lower()
+        return self._is_own_window(t) or any(k.lower() in t for k in self.CONSOLE_TITLES)
+    # 浏览器标签栏/地址栏在窗口顶部的比例（归一化 0~1000）
+    ADDRESS_BAR_Y = 90.0
 
     def _is_own_window(self, title: str) -> bool:
         t = (title or "").lower()
@@ -1896,11 +1906,24 @@ class ScreenController:
         self, action: dict[str, Any], runner: "Runner"
     ) -> dict[str, Any] | None:
         """当前台是演示控制台时，别在当前标签页改地址栏——那会把控制台盖掉。"""
-        if action.get("type") not in ("hotkey", "key"):
-            return None
-        raw = action.get("keys") or [action.get("key")]
-        keys = tuple(str(k).lower() for k in raw if k)
-        if keys not in (("ctrl", "l"), ("alt", "d")):
+        kind = action.get("type")
+        # ① 组合键进地址栏
+        if kind in ("hotkey", "key"):
+            raw = action.get("keys") or [action.get("key")]
+            keys = tuple(str(k).lower() for k in raw if k)
+            if keys not in (("ctrl", "l"), ("alt", "d")):
+                return None
+            hit_top = False
+        # ② 直接点地址栏/标签栏：浏览器顶部那条 0~9% 的位置
+        elif kind in ("click", "double_click"):
+            try:
+                y = float(action.get("y"))
+            except (TypeError, ValueError):
+                return None
+            if y > self.ADDRESS_BAR_Y:
+                return None
+            hit_top = True
+        else:
             return None
         if runner.quiz_mode:  # 答题时 ctrl+l 已被 _blocked_reload 拦掉
             return None
@@ -1910,10 +1933,12 @@ class ScreenController:
             info = await asyncio.to_thread(foreground_window)
         except Exception:  # noqa: BLE001
             return None
-        if not self._is_own_window(str(info.get("title") or "")):
+        if not self._is_console_window(str(info.get("title") or "")):
             return None
+        what = "点了地址栏/标签栏" if hit_top else "按了 ctrl+l"
         runner.frame_context.append(
-            "【系统】你要在当前标签页改地址栏，已改成新开标签页，避免把演示控制台盖掉。"
+            f"【系统】你{what}（前台就是演示控制台），这会把控制台盖掉，已改成新开标签页。"
+            "接下来的 type 会输进新标签页的地址栏，用完 ctrl+w 关掉。"
         )
         return {"type": "new_tab", "url": ""}
 
