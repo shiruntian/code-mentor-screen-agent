@@ -10,7 +10,7 @@ export const ACCENTS: Record<string, [string, string, string]> = {
   slate: ['#64748b', '#94a3b8', '石墨灰'],
 }
 
-const FONTS: Record<string, string> = {
+export const FONTS: Record<string, string> = {
   system: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   'Microsoft YaHei': "'Microsoft YaHei', 'PingFang SC', sans-serif",
   SimSun: "SimSun, 'Songti SC', serif",
@@ -52,8 +52,25 @@ export function applyAppearance(patch: Partial<Appearance> = {}): Appearance {
   localStorage.setItem(KEY.code, next.codeTheme)
   localStorage.setItem(KEY.font, next.font)
   localStorage.setItem(KEY.anim, next.anim ? 'on' : 'off')
+  // 通知 App：外观变了，好把主题色/字体同步给后端（演示提问窗要用）
+  try {
+    window.dispatchEvent(new CustomEvent('cm-appearance', { detail: next }))
+  } catch {
+    /* 忽略 */
+  }
   return next
 }
 
 export const FONT_OPTIONS = Object.keys(FONTS)
 export const CODE_THEMES = ['auto', 'github', 'one-dark', 'monokai']
+/** 主题色 → 十六进制（给后端演示提问窗用）。 */
+export function accentHex(name: string): string {
+  return (ACCENTS[name] || ACCENTS.indigo)[0]
+}
+
+/** 字体键 → 具体字族（给后端演示提问窗用，取第一个可用字族）。 */
+export function fontFamily(name: string): string {
+  const raw = FONTS[name] || FONTS.system
+  const first = raw.split(',')[0].trim().replace(/^['"]|['"]$/g, '')
+  return first === 'system-ui' ? '' : first
+}

@@ -1595,6 +1595,8 @@ class ScreenController:
                 str(int(getattr(settings, "screen_ask_tint", 0) or 0)),
                 "--accent",
                 str(getattr(settings, "screen_ask_accent", "") or "#6366f1"),
+                "--font",
+                str(getattr(settings, "screen_ask_font", "") or ""),
             ]
             for opt in options[:4]:
                 argv.extend(["--options", str(opt)])

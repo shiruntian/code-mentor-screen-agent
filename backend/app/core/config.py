@@ -139,9 +139,11 @@ class Settings(BaseSettings):
     screen_dom_reader: bool = True
     # 演示提问窗的外观（设置 → 外观 → 演示问答弹窗）
     screen_ask_opacity: float = 0.94          # 1.0 = 不透明
-    screen_ask_theme: str = "dark"            # dark / light
+    screen_ask_follow_ui: bool = True         # 配色/字体跟随界面（推荐）
+    screen_ask_theme: str = "dark"            # dark / light（follow_ui 打开时由前端自动写入）
     screen_ask_tint: int = 0                  # 负值更暗、正值更亮（-30~30）
     screen_ask_accent: str = ""               # 空 = 用默认靛蓝 #6366f1
+    screen_ask_font: str = ""                 # 空 = 微软雅黑
 
     # ---------- 记忆 ----------
     short_term_window: int = 12  # 送给模型的最大消息条数

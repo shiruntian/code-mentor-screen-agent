@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api/client'
-import { applyAppearance, readAppearance } from '../styles/appearance'
+import { accentHex, applyAppearance, fontFamily as fontFamilyOf, readAppearance } from '../styles/appearance'
 import { useAppStore } from '../stores/app'
 import { useUiStore } from '../stores/ui'
 
@@ -25,11 +25,14 @@ const scanning = ref(false)
 const rt = () => app.settings?.runtime || {}
 // 演示问答弹窗的外观（存后端 settings，拉起 tkinter 窗口时生效）
 const askLook = reactive({
+  screen_ask_follow_ui: rt().screen_ask_follow_ui ?? true,
   screen_ask_theme: rt().screen_ask_theme ?? 'dark',
   screen_ask_opacity: rt().screen_ask_opacity ?? 0.94,
   screen_ask_tint: rt().screen_ask_tint ?? 0,
   screen_ask_accent: rt().screen_ask_accent ?? '',
+  screen_ask_font: rt().screen_ask_font ?? '',
 })
+const fontFamilyKey = ref(readAppearance().font)
 const askSaving = ref(false)
 
 async function saveAskLook() {
@@ -1139,6 +1142,67 @@ function close() {
             <input v-model="animOn" type="checkbox" @change="toggleAnim" />
             <span class="tiny">页面淡入、开场白渐显、消息逐条浮现、弹窗过渡</span>
           </label>
+        </div>
+
+        <div class="style-bar">
+          <p class="group-title tight">演示问答弹窗</p>
+          <p class="tiny muted" style="margin: -4px 0 10px">
+            屏幕演示中途问你问题时弹的那个置顶小窗（不是网页里的输入条）
+          </p>
+          <label class="check-row inline" style="margin-bottom: 8px">
+            <input v-model="askLook.screen_ask_follow_ui" type="checkbox" />
+            <span class="tiny">配色、主题色、字体都跟随上面的界面设置（推荐）</span>
+          </label>
+          <label class="tiny muted">配色</label>
+          <select
+            v-model="askLook.screen_ask_theme"
+            class="input sel"
+            :disabled="askLook.screen_ask_follow_ui"
+          >
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+          </select>
+          <label class="tiny muted">
+            透明度 <span class="dim">{{ Math.round(askLook.screen_ask_opacity * 100) }}%</span>
+          </label>
+          <input
+            v-model.number="askLook.screen_ask_opacity"
+            class="range"
+            type="range"
+            min="0.5"
+            max="1"
+            step="0.02"
+          />
+          <label class="tiny muted">
+            深浅 <span class="dim">{{ askLook.screen_ask_tint > 0 ? '+' : '' }}{{ askLook.screen_ask_tint }}</span>
+          </label>
+          <input
+            v-model.number="askLook.screen_ask_tint"
+            class="range"
+            type="range"
+            min="-30"
+            max="30"
+            step="1"
+          />
+          <label class="tiny muted">强调色（留空则跟随主题色）</label>
+          <input
+            v-model="askLook.screen_ask_accent"
+            class="input"
+            :placeholder="accentHex(accent)"
+            maxlength="7"
+            :disabled="askLook.screen_ask_follow_ui"
+          />
+          <label class="tiny muted">字体（留空则跟随界面字体）</label>
+          <input
+            v-model="askLook.screen_ask_font"
+            class="input"
+            :placeholder="fontFamilyOf(fontFamilyKey)"
+            maxlength="40"
+            :disabled="askLook.screen_ask_follow_ui"
+          />
+          <button class="btn tiny btn-primary" :disabled="askSaving" @click="saveAskLook">
+            {{ askSaving ? '保存中…' : '保存弹窗外观' }}
+          </button>
         </div>
 
         <div class="brand-bar">
@@ -2256,7 +2320,6 @@ function close() {
 }
 .bg-tune input[type='range'] {
   width: 100%;
-  accent-color: var(--accent);
 }
 
 /* ================= 外观页 ================= */

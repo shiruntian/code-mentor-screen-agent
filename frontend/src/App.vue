@@ -6,7 +6,8 @@ import MessageList from './components/MessageList.vue'
 import Composer from './components/Composer.vue'
 import TaskBar from './components/TaskBar.vue'
 import { useBrandingStore } from './stores/branding'
-import { applyAppearance } from './styles/appearance'
+import { accentHex, applyAppearance, fontFamily, readAppearance } from './styles/appearance'
+import { api } from './api/client'
 import AgentPanel from './components/AgentPanel.vue'
 import BackgroundLayer from './components/BackgroundLayer.vue'
 import SettingsModal from './components/SettingsModal.vue'
@@ -21,6 +22,26 @@ branding.load()
 applyAppearance()
 const ui = useUiStore()
 
+/** 把"界面主题 + 主题色 + 字体"同步给后端：屏幕演示的提问窗按这套配色画。 */
+let syncTimer: number | undefined
+function syncAskLook() {
+  window.clearTimeout(syncTimer)
+  syncTimer = window.setTimeout(async () => {
+    try {
+      const look = readAppearance()
+      // 用户明确关掉「跟随界面」时不要覆盖他手填的配色
+      if (app.settings?.runtime?.screen_ask_follow_ui === false) return
+      await api.put('/api/settings', {
+        screen_ask_theme: ui.themeResolved === 'light' ? 'light' : 'dark',
+        screen_ask_accent: accentHex(look.accent),
+        screen_ask_font: fontFamily(look.font),
+      })
+    } catch {
+      /* 后端没起来时忽略 */
+    }
+  }, 400)
+}
+
 /** 拖到输入框以外的地方时，别让浏览器把图片当新页面打开（会丢掉整个应用） */
 function guardFileDrop(e: DragEvent) {
   const hasFiles = Array.from(e.dataTransfer?.types || []).includes('Files')
@@ -30,11 +51,14 @@ function guardFileDrop(e: DragEvent) {
 onMounted(() => {
   ui.initTheme()
   app.boot()
+  syncAskLook()
+  window.addEventListener('cm-appearance', syncAskLook)
   window.addEventListener('dragover', guardFileDrop)
   window.addEventListener('drop', guardFileDrop)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('cm-appearance', syncAskLook)
   window.removeEventListener('dragover', guardFileDrop)
   window.removeEventListener('drop', guardFileDrop)
 })

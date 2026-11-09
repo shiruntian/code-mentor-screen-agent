@@ -189,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--opacity", type=float, default=0.95)
     ap.add_argument("--tint", type=int, default=0, help="负值更暗、正值更亮")
     ap.add_argument("--accent", default="#6366f1")
+    ap.add_argument("--font", default="", help="字体族，空=微软雅黑")
     args = ap.parse_args(argv)
 
     try:
@@ -233,6 +234,11 @@ def main(argv: list[str] | None = None) -> int:
 
     exists = root.tk.call("font", "families")
     family = "Microsoft YaHei UI" if "Microsoft YaHei UI" in exists else "Microsoft YaHei"
+    # 设置里选了字体就按它画（如 楷体 KaiTi）；没装就退回雅黑
+    if args.font:
+        wanted = args.font.strip()
+        if wanted and any(str(f).lower() == wanted.lower() for f in exists):
+            family = wanted
     f_title = _font(root, family, 12, bold=True)
     f_q = _font(root, family, 11)
     f_opt = _font(root, family, 10)

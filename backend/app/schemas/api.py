@@ -140,9 +140,11 @@ class SettingsUpdate(BaseModel):
     screen_panic_hotkey: str | None = None
     screen_panic_enabled: bool | None = None
     screen_ask_opacity: float | None = Field(default=None, ge=0.4, le=1.0)
+    screen_ask_follow_ui: bool | None = None
     screen_ask_theme: str | None = Field(default=None, pattern="^(dark|light)$")
     screen_ask_tint: int | None = Field(default=None, ge=-30, le=30)
     screen_ask_accent: str | None = None
+    screen_ask_font: str | None = None
 
 
 class EnvInstallRequest(BaseModel):
